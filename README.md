@@ -88,6 +88,7 @@ portal open codex work     # work's Codex usage page, in work's profile   (also:
 portal open claude --chat  # a new chat instead of the usage page
 portal open codex --all    # every Codex account, one window each   (portal open all: every profile)
 portal login google work   # gcloud + Drive + ADC as work, with the login page in work's profile
+portal use hash            # every terminal's claude and codex now run as hash
 portal next | plan | schedule | history | watch | accounts | check
 ```
 
@@ -102,6 +103,36 @@ portal alias gh-work "GitHub Work"    # a Chrome profile works too, even one wit
 portal open gh-work                   # then open it, or: portal login gh gh-work
 portal profiles                       # every Chrome profile: who it's signed in as, its names, its accounts
 ```
+
+### Switching the account `claude` and `codex` use
+
+```sh
+portal use hash            # hash's Claude and Codex, in every terminal
+portal use claude work     # only Claude
+portal use claude          # the Claude account portal says to use now
+portal use                 # who each one uses
+portal use default         # back to the default logins
+```
+
+Nothing is copied and nobody signs in again. Every account portal signed in
+already has a config dir of its own, so switching points `CLAUDE_CONFIG_DIR` /
+`CODEX_HOME` at it. Copying a sign-in into the default login would make two
+refreshers, and the first renewal would sign the other copy out.
+
+- **Every terminal switches.** The first `portal use` adds one marked block to
+  your `~/.zshrc` (or `~/.bash_profile`) that re-reads the choice before each
+  prompt, so open terminals switch at their next prompt. A `claude` session
+  already running keeps its account. `PORTAL_NO_MODIFY_RC=1` prints the block
+  instead of adding it.
+- **Your setup comes along.** The parts of `~/.claude` that are yours and not
+  the login's (`settings.json`, `CLAUDE.md`, plugins, skills, agents,
+  commands, project memory and history) are linked into the account's dir.
+  For Codex: `config.toml`, `AGENTS.md`, `hooks.json`, prompts, skills,
+  plugins, rules. A dir that already has its own copy of one keeps it, and
+  `portal use` says so. MCP servers added with `claude mcp add --scope user`
+  live in `~/.claude.json` with the default login, so they don't come along.
+- **Terminals only.** The Claude desktop app, the ChatGPT app and editor
+  extensions don't read your shell's settings, so they keep the default login.
 
 ### What the home screen tells you
 
@@ -176,6 +207,7 @@ portal check                                # who each tool is signed in as
 | `~/.local/share/portal/history.db` | readings, for pace and history (30 days) |
 | `~/.local/share/portal/cache.json` | the last reading per account, and which token belongs to whom (by fingerprint, never the token) |
 | `~/.local/share/portal/homes/` | config dirs of the accounts portal signed in |
+| `~/.local/share/portal/use.sh` | which account terminals use, written by `portal use` and read by your shell |
 
 `PORTAL_HOME=<dir>` puts all of it under one directory.
 
