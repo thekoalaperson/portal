@@ -12,6 +12,7 @@ import { dim } from './ui/render.js'
 
 const FETCH_TIMEOUT_MS = 12_000
 const REUSE_MS = 60_000   // a reading this young is still the truth; don't ask again
+const RETRY_AFTER_MS = 700
 
 // PORTAL_FIXTURE=<file.json> replays recorded provider responses instead of
 // polling, so the engine and the screens run without any live token. The file
@@ -32,11 +33,19 @@ async function read(account, { reuse = true } = {}) {
   if (fixed) return fixed
   const recent = reuse && cache.recentUsage(account.key, REUSE_MS)
   if (recent) return { ...recent, reused: true }
-  let usage
-  try {
-    usage = await PROVIDERS[account.provider].fetchUsage(account, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
-  } catch (err) {
-    usage = { ok: false, error: err.name === 'TimeoutError' ? 'timed out' : err.message }
+  const attempt = async () => {
+    try {
+      return await PROVIDERS[account.provider].fetchUsage(account, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+    } catch (err) {
+      return { ok: false, error: err.name === 'TimeoutError' ? 'timed out' : err.message }
+    }
+  }
+  let usage = await attempt()
+  // A blip (a 429, a dropped connection) is worth one more try before the
+  // screen falls back to an old reading; a sign-in problem is not.
+  if (!usage.ok && !usage.inactive) {
+    await new Promise(r => setTimeout(r, RETRY_AFTER_MS))
+    usage = await attempt()
   }
   if (usage.ok) cache.rememberUsage(account.key, usage)
   return usage

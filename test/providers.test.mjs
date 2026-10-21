@@ -161,3 +161,15 @@ process.stdin.on('data', (d) => {
     srv.close()
   }
 })
+
+// A Codex week nobody has used reports its reset a full window from now; one
+// message starts the clock but still reads 0% used. Told apart by seconds.
+test('a Codex week started by one message is started, not "on first use"', async () => {
+  const { normalize } = await import(join(root, 'src/providers/codex.js'))
+  const at = (sinceStart) => normalize({ rate_limit: { primary_window: {
+    used_percent: 0, limit_window_seconds: 604800, reset_after_seconds: 604800 - sinceStart,
+    reset_at: Math.floor(Date.now() / 1000) + 604800 - sinceStart } } }).windows[0]
+  assert.equal(at(0).startsOnUse, true)
+  assert.equal(at(150).startsOnUse, undefined)
+  assert.ok(at(150).resetAt > Date.now() + 167 * H)
+})

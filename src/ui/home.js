@@ -173,7 +173,10 @@ function footer(group, provider) {
     out.push(yellow(`${signedOut.map(r => nameOf(r.account)).join(', ')}: last readings shown`) + dim(' · ') +
       (signedOut.length > 1 ? 'portal setup' + dim(' signs each in once') : `portal login ${provider} ${handleOf(signedOut[0].account)}` + dim(' signs it in for good')))
   }
-  if (flaky.length) out.push(dim(`${flaky.map(r => nameOf(r.account)).join(', ')}: ${provider} didn't answer just now · last readings shown`))
+  if (flaky.length) {
+    const why = [...new Set(flaky.map(r => r.usage.error).filter(Boolean))].join(', ')
+    out.push(dim(`${flaky.map(r => nameOf(r.account)).join(', ')}: ${provider} didn't answer just now${why ? ` (${why})` : ''} · last readings shown`))
+  }
   const lapsing = group.filter(r => r.usage.signInUntil && r.usage.signInUntil - Date.now() < LAPSE_WARN_MS)
   for (const r of lapsing) {
     out.push(yellow(`${nameOf(r.account)}'s sign-in stops renewing ${dateOnly(r.usage.signInUntil)}`) + dim(' unless used · ') + `portal login ${provider} ${handleOf(r.account)}`)

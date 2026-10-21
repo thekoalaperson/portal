@@ -35,8 +35,11 @@ function windowKind(seconds) {
 }
 
 // ChatGPT starts a window's clock on first use. Until then it reports the reset
-// as one full window from whenever it is asked, so that time is not a deadline.
-const UNSTARTED_SLACK_S = 120
+// as one full window from whenever it is asked (0s into the window, every
+// time), so that time is not a deadline. A week started by a single message is
+// still at 0% used, but seconds into its window, with a fixed reset -- so the
+// slack is seconds, not minutes.
+const UNSTARTED_SLACK_S = 10
 
 function normalizeWindow(w) {
   if (!w) return null
