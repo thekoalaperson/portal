@@ -38,13 +38,6 @@ it's missing. It clones portal into `~/.portal`, links `~/.local/bin/portal`,
 adds `~/.local/bin` to your PATH if it isn't there, then offers to run
 `portal setup`. Run it again any time to update, or use `portal update`.
 
-While the repository is private, fetch the installer through the GitHub CLI
-instead (after `gh auth login`):
-
-```sh
-/bin/bash -c "$(gh api repos/thekoalaperson/portal/contents/install.sh -H 'Accept: application/vnd.github.raw')"
-```
-
 Uninstall: `rm ~/.local/bin/portal && rm -rf ~/.portal`, plus `~/.config/portal`
 and `~/.local/share/portal` if you also want your settings and history gone.
 
