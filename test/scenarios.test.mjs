@@ -9,8 +9,8 @@
 
 import { describe, it, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -339,4 +339,66 @@ test('Chrome profiles without an AI account can be named, opened and used for lo
   const nope = await runPortal(env, ['open', 'nowhere', '--dry-run'])
   assert.equal(nope.code, 1)
   assert.match(nope.out, /no account or Chrome profile matches "nowhere"[\s\S]*profiles: Hash, Work, Spare, GitHub Work, Scratch/)
+})
+
+// `portal use` points every terminal's claude and codex at an account's own
+// config dir: nothing copied, the person's settings linked in, and the shell
+// block that applies it added to the rc file once.
+test('portal use switches which account every terminal uses', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'portal-use-'))
+  const { home, portal } = machine(dir)
+  // The default logins, with the settings a person has built up around them.
+  mkdirSync(join(home, '.claude', 'skills'), { recursive: true })
+  writeFileSync(join(home, '.claude', 'settings.json'), '{"theme":"dark"}')
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'solo@gmail.com' }, mcpServers: { linear: {} } }))
+  mkdirSync(join(home, '.codex'), { recursive: true })
+  writeFileSync(join(home, '.codex', 'config.toml'), 'model = "x"\n')
+  writeFileSync(join(portal, 'homes', 'claude-spare', 'settings.json'), '{}')   // one home with its own
+  writeFileSync(join(dir, 'fixture.json'), '[]')
+  const env = { HOME: home, PORTAL_HOME: portal, PORTAL_FAKE_KEYCHAIN: join(dir, 'keychain.json'), PORTAL_NO_PROMPT: '1',
+    PORTAL_FIXTURE: join(dir, 'fixture.json'), SHELL: '/bin/zsh', ZDOTDIR: '' }
+  const useSh = join(portal, 'data', 'use.sh'), zshrc = join(home, '.zshrc')
+  const claudeHome = (who) => join(portal, 'homes', `claude-${who}`)
+
+  const first = await runPortal(env, ['use', 'hash'])
+  assert.match(first, /claude\s+→ hash@gmail\.com/, first)
+  assert.match(first, /codex\s+→ hash@gmail\.com/, first)
+  assert.match(first, /shares settings\.json, skills with ~\/\.claude/, first)
+  assert.match(first, /shares config\.toml with ~\/\.codex/, first)
+  assert.match(first, /user MCP servers \(linear\)/, first)
+  assert.match(first, /added a block to .*\.zshrc/, first)
+  assert.equal(readlinkSync(join(claudeHome('hash'), 'settings.json')), join(home, '.claude', 'settings.json'))
+  assert.match(readFileSync(useSh, 'utf8'), new RegExp(`export CLAUDE_CONFIG_DIR='${claudeHome('hash')}'`))
+
+  // Again, for one tool: the other keeps its choice, the rc block stays single.
+  const again = await runPortal(env, ['use', 'claude', 'spare'])
+  assert.match(again, /claude\s+→ spare@gmail\.com/, again)
+  assert.match(again, /keeps its own settings\.json/, again)
+  assert.doesNotMatch(again, /codex\s+→/, again)
+  assert.match(again, /every terminal switches at its next prompt/, again)
+  assert.ok(!lstatSync(join(claudeHome('spare'), 'settings.json')).isSymbolicLink())
+  assert.equal(readFileSync(zshrc, 'utf8').split('# added by portal use').length, 2)
+
+  // A real zsh reading the rc file ends up switched.
+  if (spawnSync('zsh', ['-c', 'true']).status === 0) {
+    const sh = spawnSync('zsh', ['-f', '-c', `. "${zshrc}"; print -r -- "$CLAUDE_CONFIG_DIR|$CODEX_HOME"`], { env: { PATH: process.env.PATH, HOME: home }, encoding: 'utf8' })
+    assert.equal(sh.stdout.trim(), `${claudeHome('spare')}|${join(portal, 'homes', 'codex-hash')}`, sh.stderr)
+  }
+
+  const status = await runPortal({ ...env, CLAUDE_CONFIG_DIR: claudeHome('spare') }, ['use'])
+  assert.match(status, /claude\s+spare@gmail\.com\s+portal use/, status)
+  // This terminal never picked up the Codex switch, and there is no default Codex login.
+  assert.match(status, /codex\s+hash@gmail\.com\s+portal use\s+this terminal: the default login, signed out/, status)
+  assert.doesNotMatch(status, /undefined|null/, status)
+  const check = await runPortal({ ...env, CLAUDE_CONFIG_DIR: claudeHome('spare') }, ['check'])
+  assert.match(check, /claude\s+spare@gmail\.com\s+portal use/, check)
+
+  const back = await runPortal(env, ['use', 'default'])
+  assert.match(back, /claude\s+→ solo@gmail\.com · the default login/, back)
+  const sh = readFileSync(useSh, 'utf8')
+  assert.match(sh, /unset CLAUDE_CONFIG_DIR/)
+  assert.match(sh, /unset CODEX_HOME/)
+
+  const nope = await runPortal(env, ['use', 'nobody'])
+  assert.equal(nope.code, 1)
 })

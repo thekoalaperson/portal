@@ -120,17 +120,19 @@ function orcaAccounts() {
 
 // --------------------------------------------------------------- default
 
-function defaultAccounts() {
+// The default dirs, and whatever CLAUDE_CONFIG_DIR / CODEX_HOME point at --
+// unless that is a dir already found as portal's or orca's, as it is in a
+// terminal `portal use` switched.
+function defaultAccounts(known) {
   const out = []
   const claudeDirs = [[join(HOME, '.claude'), true]]
-  if (process.env.CLAUDE_CONFIG_DIR && process.env.CLAUDE_CONFIG_DIR !== join(HOME, '.claude')) {
-    claudeDirs.push([process.env.CLAUDE_CONFIG_DIR, false])
-  }
+  const env = process.env.CLAUDE_CONFIG_DIR
+  if (env && env !== join(HOME, '.claude') && !known.has(env)) claudeDirs.push([env, false])
   for (const [dir, isDefault] of claudeDirs) {
     const c = claudeIn(dir, { isDefault })
     if (c.email) out.push({ provider: 'claude', source: 'default', ...c })
   }
-  const codexHomes = [...new Set([join(HOME, '.codex'), process.env.CODEX_HOME].filter(Boolean))]
+  const codexHomes = [...new Set([join(HOME, '.codex'), process.env.CODEX_HOME].filter(h => h && !known.has(h)))]
   for (const home of codexHomes) {
     const isDefault = home === join(HOME, '.codex')
     const c = codexIn(home, { isDefault })
@@ -169,11 +171,9 @@ const cmp = (x, y) => x < y ? -1 : x > y ? 1 : 0
 
 export function discover(cfg) {
   const byKey = new Map()
-  const found = [
-    ...portalAccounts(cfg),
-    ...(cfg.sources.orca !== false ? orcaAccounts() : []),
-    ...(cfg.sources.default !== false ? defaultAccounts() : []),
-  ]
+  const found = [...portalAccounts(cfg), ...(cfg.sources.orca !== false ? orcaAccounts() : [])]
+  const known = new Set(found.flatMap(f => (f.creds ?? []).map(c => c.home)).filter(Boolean))
+  if (cfg.sources.default !== false) found.push(...defaultAccounts(known))
   for (const f of found) {
     const key = keyOf(f.provider, f.email)
     let acct = byKey.get(key)

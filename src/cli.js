@@ -15,6 +15,7 @@ import { PROVIDERS, PROVIDER_ORDER } from './providers/index.js'
 import { allRecipes, BUILTIN, prepare, probe, runPrepared, shellish } from './recipes.js'
 import { locate, notFound, resolveAccounts, resolvePerson, resolveProfile } from './resolve.js'
 import * as store from './store.js'
+import { homeOf, inUse, installHook, share, unsharedMcp, VAR, writeChoice } from './use.js'
 import { home, nextLine } from './ui/home.js'
 import { interactive } from './ui/prompt.js'
 import { bold, dim, green, red, screen, yellow } from './ui/render.js'
@@ -180,17 +181,88 @@ async function cmdOpen(ctx) {
   const url = flags.chat || !site.usage ? site.url : site.usage
   if (site.provider && flags.all) return openEach(accounts.filter(x => x.provider === site.provider), url)
   if (who) return goTo(who, url)
-  if (site.provider) {
-    // No one named: the account the planner would have him use right now.
-    const snap = await snapshot(accounts.filter(a => a.provider === site.provider), { quiet: true })
-    const p = snap.plans[site.provider]
-    const pick = p?.steps[0]?.a ?? p?.next?.a
-    if (!pick) throw new Error(`no ${site.provider} account to open`)
-    say(dim(p.steps[0] ? `${nameOf(pick.account)} is the one to use now` : `nothing usable; ${nameOf(pick.account)} comes back first`))
-    return go(pick.account, url)
-  }
+  if (site.provider) return go(await pickNow(accounts, site.provider), url)
   if (site.who) return goTo(site.who, url)
   throw new Error(`say whose profile: portal open ${target} <who>`)
+}
+
+// No one named: the account the planner would have him use right now, or the
+// one that comes back first.
+async function pickNow(accounts, provider) {
+  const snap = await snapshot(accounts.filter(a => a.provider === provider), { quiet: true })
+  const p = snap.plans[provider]
+  const pick = p?.steps[0]?.a ?? p?.next?.a
+  if (!pick) throw new Error(`no ${provider} account to pick`)
+  say(dim(p.steps[0] ? `${nameOf(pick.account)} is the one to use now` : `nothing usable; ${nameOf(pick.account)} comes back first`))
+  return pick.account
+}
+
+// ------------------------------------------------------------------ use
+
+// portal use                    who `claude` and `codex` use in a terminal
+// portal use hash               hash's Claude and Codex, in every terminal
+// portal use claude hash        only Claude
+// portal use claude             the Claude account to use now
+// portal use default            back to the default logins
+async function cmdUse(ctx) {
+  const { cfg, accounts } = ctx
+  let [first, second] = ctx.rest
+  if (!first) return useStatus(ctx)
+  // "use hash claude" means the same as "use claude hash".
+  if (!PROVIDERS[first] && second && PROVIDERS[second]) [first, second] = [second, first]
+  const provider = PROVIDERS[first] ? first : null
+  const who = provider ? second : first
+
+  const picks = {}   // provider -> account, or null for the default login
+  if (who?.toLowerCase() === 'default') for (const p of provider ? [provider] : PROVIDER_ORDER) picks[p] = null
+  else if (!who) picks[provider] = await pickNow(accounts, provider)
+  else for (const a of resolvePerson(provider ? accounts.filter(a => a.provider === provider) : accounts, who)) picks[a.provider] = a
+
+  say('')
+  for (const [p, account] of Object.entries(picks)) {
+    const home = account ? homeOf(account) : null
+    if (home === undefined) throw new Error(`${account.email} has no ${p} config dir portal can point at · sign it in: portal login ${p} ${account.email}`)
+    cfg.use[p] = home ? account.email : null
+    const def = account && !home ? account : ctx.allAccounts.find(a => a.provider === p && homeOf(a) === null)
+    say(`  ${bold(p.padEnd(6))} → ${green(home ? account.email : def?.email ?? 'the default login')}` + dim(home ? '' : ' · the default login'))
+    if (!home) continue
+    const { linked, own } = share(p, account)
+    if (linked.length) say(dim(`           shares ${linked.join(', ')} with ~/.${p}`))
+    if (own.length) say(dim(`           keeps its own ${own.join(', ')}`))
+    const mcp = p === 'claude' ? unsharedMcp() : []
+    if (mcp.length) say(yellow(`           your user MCP servers (${mcp.join(', ')}) live with the default login: add them here with claude mcp add`))
+  }
+  save(cfg)
+  writeChoice(choiceOf(cfg, ctx.allAccounts))
+
+  const hook = installHook()
+  say('')
+  if (hook.manual) say(yellow(`  ${hook.manual}`))
+  else if (hook.added) say(dim(`  added a block to ${hook.rc} · this terminal follows once you open a new one or run: source ${hook.rc}`))
+  else say(dim('  every terminal switches at its next prompt · a session already running keeps its account'))
+  say('')
+}
+
+// Every provider `portal use` has a say in, with the dir it points at now.
+function choiceOf(cfg, accounts) {
+  return Object.fromEntries(Object.entries(cfg.use).map(([p, email]) => {
+    const account = email && accounts.find(a => a.provider === p && a.email === email)
+    const home = account ? homeOf(account) : null
+    return [p, { email: home ? email : null, home: home ?? null }]
+  }))
+}
+
+function useStatus(ctx) {
+  const { cfg } = ctx
+  const rows = PROVIDER_ORDER.map((p) => {
+    const chosen = p in cfg.use
+    const account = chosen && cfg.use[p] ? ctx.allAccounts.find(a => a.provider === p && a.email === cfg.use[p]) : ctx.allAccounts.find(a => a.provider === p && homeOf(a) === null)
+    const here = inUse(ctx.allAccounts, p)
+    return [bold(p), account ? green(account.email) : dim('—'), dim(chosen && cfg.use[p] ? 'portal use' : 'the default login'),
+      here?.email === account?.email ? '' : yellow(`this terminal: ${here?.email ?? process.env[VAR[p]] ?? 'the default login, signed out'}`)]
+  })
+  say(screen({ what: 'use', note: 'the account `claude` and `codex` use in a terminal', rows, headers: ['tool', 'account', 'from', ''],
+    footnotes: ['switch: portal use <who>   ·   one tool: portal use claude <who>   ·   the one to use now: portal use claude', 'back to the default logins: portal use default'] }))
 }
 
 // ---------------------------------------------------------------- login
@@ -377,9 +449,12 @@ async function cmdCheck(ctx) {
     !res ? dim('—') : res.ok ? (known.has(res.text) ? green(res.text) : res.text) : yellow(res.text || 'not signed in'),
     dim(shellish(r.check)),
   ])
+  // What `claude` and `codex` reach from this terminal.
   for (const provider of PROVIDER_ORDER) {
-    const def = ctx.allAccounts.find(a => a.provider === provider && a.sources.includes('default'))
-    rows.push([bold(provider), def ? green(def.email) : dim('—'), dim('the default login')])
+    const here = inUse(ctx.allAccounts, provider)
+    const dir = process.env[VAR[provider]]
+    const from = !dir ? 'the default login' : ctx.cfg.use[provider] === here?.email ? 'portal use' : `$${VAR[provider]}`
+    rows.push([bold(provider), here ? green(here.email) : dim(dir ? `unknown: ${dir}` : '—'), dim(from)])
   }
   say(screen({ what: 'check', note: 'who each tool is signed in as', rows, headers: ['tool', 'signed in as', 'from'] }))
 }
@@ -412,7 +487,7 @@ const HELP = `
     portal history                 the last 24h of every week, as a line
     portal watch                   the home screen, refreshed every 5 minutes
     portal accounts                every account: its names, sign-in, Chrome profile, renewal
-    portal check                   who gcloud, gh, your recipes and the default CLIs are signed in as
+    portal check                   who gcloud, gh, your recipes, claude and codex are signed in as
       --all                          every window and model cap, not just what needs attention
 
   ${bold('open')}  ${dim('(in the account\'s own Chrome profile)')}
@@ -422,6 +497,12 @@ const HELP = `
       --chat                         a new chat instead of the usage page
     portal open hash               hash's Chrome profile
     portal open all                every profile, one window each
+
+  ${bold('use')}  ${dim('(which account `claude` and `codex` use, in every terminal; nothing is copied)')}
+    portal use                     who they use now
+    portal use hash                hash's Claude and Codex         ${dim('portal use claude hash: only Claude')}
+    portal use claude              the Claude account to use now
+    portal use default             back to the default logins
 
   ${bold('sign in')}
     portal setup                   find accounts, sign in the ones that can't be read, add more
@@ -451,7 +532,7 @@ const HELP = `
 const COMMANDS = {
   next: cmdNext, plan: cmdPlan, schedule: cmdSchedule, history: cmdHistory, watch: cmdWatch,
   accounts: cmdAccounts, ls: cmdAccounts, open: cmdOpen, o: cmdOpen,
-  login: cmdLogin, auth: cmdLogin, add: cmdAdd,
+  login: cmdLogin, auth: cmdLogin, add: cmdAdd, use: cmdUse,
   setup: async (ctx) => (await import('./setup.js')).setup(ctx.cfg, ctx.allAccounts),
   name: cmdName, alias: cmdName, profile: cmdProfile, profiles: cmdProfile,
   hide: (ctx) => cmdHide(ctx, true), show: (ctx) => cmdHide(ctx, false), renews: cmdRenews,
