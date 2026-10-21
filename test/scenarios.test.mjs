@@ -312,4 +312,9 @@ test('a new computer with a carried-over config lists what to sign in', () => {
   assert.match(home1, /not signed in/, home1)
   const dry = run(dir, env, ['login', 'claude', 'hash', '--dry-run'])
   assert.match(dry, /claude auth login --claudeai --email hash@gmail\.com/, dry)
+  // A brand-new account, named by address or by Chrome profile, with no questions asked.
+  const byAddress = run(dir, env, ['login', 'codex', 'spare@gmail.com', '--dry-run'])
+  assert.match(byAddress, /bring up Chrome "Spare", then run: CODEX_HOME=.* codex login/, byAddress)
+  const byProfile = run(dir, env, ['login', 'claude', 'Spare', '--dry-run'])
+  assert.match(byProfile, /claude auth login --claudeai --email spare@gmail\.com/, byProfile)
 })

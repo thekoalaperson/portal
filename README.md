@@ -36,14 +36,20 @@ The first run on a machine with no accounts walks you through setup. On a
 machine that already has `claude` or `codex` signed in, those accounts show up
 straight away.
 
-### From Claude Code
+### From Claude Code or Codex
 
-The `plugin/` folder is a Claude Code plugin that lets Claude answer "which
-account should I use?" and run setup and logins through the CLI:
+The `plugin/` folder is a plugin for both. It lets the agent answer "which
+account should I use?", walk you through setup and add accounts, logins and
+names, all through the CLI:
 
 ```
+# Claude Code
 /plugin marketplace add thekoalaperson/portal
 /plugin install portal@portal
+
+# Codex
+codex plugin marketplace add thekoalaperson/portal
+codex plugin add portal@portal
 ```
 
 ## Setting up

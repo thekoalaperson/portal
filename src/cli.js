@@ -1,7 +1,7 @@
 // portal: every Claude and Codex account in one place, and every account's
 // Chrome profile one command away.
 
-import { profiles, launch } from './chrome.js'
+import { profileFor, profiles, launch } from './chrome.js'
 import { keyOf, load, save } from './config.js'
 import { discover } from './discover.js'
 import { readState, leftOf } from './plan.js'
@@ -216,9 +216,17 @@ async function cmdLogin(ctx) {
   if (PROVIDERS[what]) {
     let email = null, profile = null
     if (who) {
-      const person = resolvePerson(accounts, who)
-      email = person[0].email
-      profile = person[0].chrome
+      // A known account, or a new one named by its address or its Chrome
+      // profile -- so an account can be added without a terminal to ask on.
+      let person = null
+      try { person = resolvePerson(accounts, who)[0] } catch (err) { if (!/no account matches/.test(err.message)) throw err }
+      if (person) { email = person.email; profile = person.chrome }
+      else if (who.includes('@')) { email = who.toLowerCase(); profile = profileFor(email, cfg) }
+      else {
+        profile = findProfile(who)
+        if (!profile) throw new Error(`no account or Chrome profile matches "${who}" · name a new account by its address: portal login ${what} you@example.com`)
+        email = profile.email || null
+      }
     }
     const r = await signIn(cfg, what, { email, profile, dryRun: !!flags['dry-run'], log: (s) => say(dim(s)) })
     if (r) say(r.mismatch ? yellow(`signed in as ${r.email}, not ${r.asked}`) : green(`✓ ${what} · ${r.email}`) + dim(' · readable from now on'))
@@ -417,6 +425,7 @@ const HELP = `
   ${bold('sign in')}
     portal setup                   find accounts, sign in the ones that can't be read, add more
     portal add [claude|codex]      add an account: pick its Chrome profile, sign in once
+    portal login claude <address>  the same without questions: by address or Chrome profile name
     portal login claude hash       give hash's Claude a sign-in of its own, so it's always readable
     portal login google work       gcloud + Drive + ADC as work, the login page in work's profile
     portal login <recipe> <who>    gh, gcloud, adc, or your own  ${dim('-- passes flags through')}
