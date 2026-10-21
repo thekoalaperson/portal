@@ -12,7 +12,7 @@ import { readState, leftOf } from './plan.js'
 import { snapshot as poll } from './poll.js'
 import { PROVIDERS, PROVIDER_ORDER } from './providers/index.js'
 import { allRecipes, BUILTIN, prepare, probe, runPrepared, shellish } from './recipes.js'
-import { people, resolveAccounts, resolvePerson } from './resolve.js'
+import { people, resolveAccounts, resolvePerson, resolveProfile } from './resolve.js'
 import { setup } from './setup.js'
 import { signIn } from './signin.js'
 import * as store from './store.js'
@@ -85,7 +85,15 @@ function jsonOf(snap) {
 }
 
 async function cmdDetail(ctx, selector) {
-  const matches = resolvePerson(ctx.accounts, selector)
+  let matches
+  try {
+    matches = resolvePerson(ctx.accounts, selector)
+  } catch (err) {
+    if (!/no account matches/.test(err.message)) throw err
+    const { profile } = resolveProfile(ctx.accounts, ctx.cfg, selector)
+    return say(dim(`\n  "${selector}" is the Chrome profile "${profile.label}"${profile.email ? ` (${profile.email})` : ''}, with no Claude or Codex account here\n  `) +
+      `portal open ${selector}` + dim(' opens it · ') + `portal login gh ${selector}` + dim(' signs in there · ') + `portal login claude ${selector}` + dim(' adds an account\n'))
+  }
   const snap = await snapshot(matches)
   if (ctx.flags.json) return say(JSON.stringify(jsonOf(snap), null, 2))
   say(detail(snap.results, snap.plans))
@@ -158,11 +166,13 @@ async function cmdOpen(ctx) {
   if (!target) throw new Error('usage: portal open <claude|codex|chatgpt|site|who> [who]')
   const sites = { ...SITES, ...Object.fromEntries(Object.entries(cfg.sites ?? {}).map(([k, v]) => [k, typeof v === 'string' ? { url: v } : v])) }
   const dryRun = !!flags['dry-run']
-  const go = (account, url) => {
-    if (!account.chrome) throw new Error(`${account.email} has no Chrome profile · portal profile ${nameOf(account)} <profile>`)
-    const cmd = launch(account.chrome, url, { dryRun })
-    say(dim(dryRun ? `would run: ${cmd}` : `${account.chrome.label} · ${account.email}${url ? ` → ${url}` : ''}`))
+  const show = (profile, email, url, who) => {
+    if (!profile) throw new Error(`${email ?? who} has no Chrome profile · portal profile ${who ?? email} <profile>`)
+    const cmd = launch(profile, url, { dryRun })
+    say(dim(dryRun ? `would run: ${cmd}` : `${profile.label}${email ? ` · ${email}` : ''}${url ? ` → ${url}` : ''}`))
   }
+  const go = (account, url) => show(account.chrome, account.email, url, nameOf(account))
+  const goTo = (who, url) => { const t = resolveProfile(accounts, cfg, who); show(t.profile, t.email, url, who) }
 
   if (target === 'all') {
     const seen = new Set()
@@ -177,7 +187,7 @@ async function cmdOpen(ctx) {
   // "open hash claude" means the same as "open claude hash".
   if (!sites[target.toLowerCase()] && who && sites[who.toLowerCase()]) [target, who] = [who, target]
   const site = sites[target.toLowerCase()]
-  if (!site) return go(resolvePerson(accounts, target)[0], null)
+  if (!site) return goTo(target, null)
 
   // The usage page by default, a fresh chat with --chat: his call, last version.
   const url = flags.chat || !site.usage ? site.url : site.usage
@@ -190,10 +200,7 @@ async function cmdOpen(ctx) {
     }
     return
   }
-  if (who) {
-    const matches = resolvePerson(accounts, who)
-    return go((site.provider && matches.find(a => a.provider === site.provider)) ?? matches[0], url)
-  }
+  if (who) return goTo(who, url)
   if (site.provider) {
     // No one named: the account the planner would have him use right now.
     const snap = await snapshot(accounts.filter(a => a.provider === site.provider && !a.hidden), { quiet: true })
@@ -203,7 +210,7 @@ async function cmdOpen(ctx) {
     say(dim(p.steps[0] ? `${nameOf(pick.account)} is the one to use now` : `nothing usable; ${nameOf(pick.account)} comes back first`))
     return go(pick.account, url)
   }
-  if (site.who) return go(resolvePerson(accounts, site.who)[0], url)
+  if (site.who) return goTo(site.who, url)
   throw new Error(`say whose profile: portal open ${target} <who>`)
 }
 
@@ -223,14 +230,12 @@ async function cmdLogin(ctx) {
     if (who) {
       // A known account, or a new one named by its address or its Chrome
       // profile -- so an account can be added without a terminal to ask on.
-      let person = null
-      try { person = resolvePerson(accounts, who)[0] } catch (err) { if (!/no account matches/.test(err.message)) throw err }
-      if (person) { email = person.email; profile = person.chrome }
-      else if (who.includes('@')) { email = who.toLowerCase(); profile = profileFor(email, cfg) }
-      else {
-        profile = findProfile(who)
-        if (!profile) throw new Error(`no account or Chrome profile matches "${who}" · name a new account by its address: portal login ${what} you@example.com`)
-        email = profile.email || null
+      try {
+        ({ email, profile } = resolveProfile(accounts, cfg, who))
+      } catch (err) {
+        if (!/no account or Chrome profile matches/.test(err.message) || !who.includes('@')) throw err
+        email = who.toLowerCase()
+        profile = profileFor(email, cfg)
       }
     }
     const r = await signIn(cfg, what, { email, profile, dryRun: !!flags['dry-run'], log: (s) => say(dim(s)) })
@@ -240,11 +245,10 @@ async function cmdLogin(ctx) {
 
   const recipe = recipes[what]
   if (!recipe) throw new Error(`no login recipe "${what}" · known: claude, codex, ${Object.keys(recipes).join(', ')}\n  add one: portal recipe add ${what} -- <command…>`)
-  let account = null
-  if (who) account = resolvePerson(accounts, who)[0]
-  const profile = account?.chrome ?? (who ? findProfile(who) : null)
-  if (!profile && who) throw new Error(`no Chrome profile for "${who}"`)
-  const prepared = prepare(recipe, { email: account?.email ?? profile?.email, profile, extra: [...extra, ...(passthrough ?? [])] })
+  const target = who ? resolveProfile(accounts, cfg, who) : null
+  const profile = target?.profile ?? null
+  if (who && !profile) throw new Error(`${target.email} has no Chrome profile · portal profile ${who} <profile>`)
+  const prepared = prepare(recipe, { email: target?.email ?? profile?.email ?? null, profile, extra: [...extra, ...(passthrough ?? [])] })
   const how = !profile ? '' : prepared.focus ? `bring up Chrome "${profile.label}", then ` : `send the sign-in page to Chrome "${profile.label}": `
   if (flags['dry-run']) return say(dim(`would ${how}run: ${shellish(prepared.argv)}`))
   if (profile) say(dim(`signing in through Chrome "${profile.label}" · ${shellish(prepared.argv)}`))
@@ -294,19 +298,28 @@ async function cmdName(ctx) {
     save(cfg)
     return say(dim(`forgot "${name}"`))
   }
-  if (!who) throw new Error('usage: portal name <name> <who>   (or: portal name <name> --remove)')
-  cfg.names[key] = resolvePerson(accounts, who)[0].email
+  if (!who) throw new Error('usage: portal alias <name> <account or Chrome profile>   (or: portal alias <name> --remove)')
+  const target = resolveProfile(accounts, cfg, who)
+  // An address when there is one (it reaches the account and its profile
+  // alike, on any machine); a profile's own name for a profile signed into none.
+  cfg.names[key] = target.email ?? { profile: target.profile.label }
   save(cfg)
-  say(dim(`"${name}" → ${cfg.names[key]}`))
+  say(dim(`"${name}" → ${target.email ?? `Chrome "${target.profile.label}"`}` + (target.accounts.length || !target.profile ? '' : ` · Chrome profile "${target.profile.label}", no Claude/Codex account`)))
 }
 
 function cmdProfile(ctx) {
   const [who, ...rest] = ctx.rest
   const wanted = rest.join(' ')
   if (!who || !wanted) {
-    const rows = profiles().map(p => [bold(p.label), dim(p.dir), p.email || dim('not signed in')])
-    return say(screen({ what: 'chrome profiles', rows, headers: ['profile', 'directory', 'signed in as'],
-      footnotes: ['use one for an account: portal profile <who> <profile>'] }))
+    const names = Object.entries(ctx.cfg.names ?? {})
+    const rows = profiles().map(p => {
+      const mine = names.filter(([, v]) => typeof v === 'string' ? !!p.email && v === p.email : v?.profile === p.label || v?.profile === p.dir).map(([n]) => n)
+      const kinds = [...new Set(ctx.accounts.filter(a => a.chrome?.dir === p.dir).map(a => a.provider))]
+      return [bold(p.label), p.email || dim('not signed in'), mine.join(', ') || dim('—'), kinds.join(', ') || dim('—'), dim(p.dir)]
+    })
+    return say(screen({ what: 'chrome profiles', rows, headers: ['profile', 'signed in as', 'names', 'accounts', 'directory'],
+      footnotes: ['name one: portal alias <name> <profile>   ·   then: portal open <name>, portal login gh <name>',
+        'use one for an account no profile is signed into: portal profile <who> <profile>'] }))
   }
   const person = resolvePerson(ctx.accounts, who)[0]
   const p = findProfile(wanted)
@@ -450,7 +463,9 @@ const HELP = `
     portal recipe add <name> -- <command {email}>      ${dim('register your own login, like an alias')}
 
   ${bold('names')}
-    portal name work acme          "work" now means that account   ${dim('portal name work --remove')}
+    portal alias work acme         "work" now means that account   ${dim('portal alias work --remove')}
+    portal alias gh-work "GitHub Work"   a name for a Chrome profile, even one with no Claude/Codex account
+    portal profiles                every Chrome profile: who it's signed in as, its names, its accounts
     portal profile <who> <profile> use a Chrome profile for an address no profile is signed into
     portal renews <who> <date>     when a Claude plan renews (Codex knows its own)
     portal hide <who> / show <who> keep an account off the screens  ${dim('(--hidden shows them)')}

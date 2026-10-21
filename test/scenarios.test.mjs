@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -317,4 +317,40 @@ test('a new computer with a carried-over config lists what to sign in', () => {
   assert.match(byAddress, /bring up Chrome "Spare", then run: CODEX_HOME=.* codex login/, byAddress)
   const byProfile = run(dir, env, ['login', 'claude', 'Spare', '--dry-run'])
   assert.match(byProfile, /claude auth login --claudeai --email spare@gmail\.com/, byProfile)
+})
+
+// Chrome profiles are somewhere to open a page or run a login even when they
+// hold no Claude or Codex account: a GitHub-only work profile, or one not
+// signed into Google at all. They can be named, opened, and logged in from.
+test('Chrome profiles without an AI account can be named, opened and used for logins', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'portal-profiles-'))
+  const { home, portal } = machine(dir)
+  const state = join(home, 'Library/Application Support/Google/Chrome/Local State')
+  const ls = JSON.parse(readFileSync(state, 'utf8'))
+  ls.profile.info_cache['Profile 8'] = { name: 'GitHub Work', user_name: 'gh@company.com' }
+  ls.profile.info_cache['Profile 9'] = { name: 'Scratch', user_name: '' }
+  writeFileSync(state, JSON.stringify(ls))
+  const env = { HOME: home, PORTAL_HOME: portal, PORTAL_FAKE_KEYCHAIN: join(dir, 'keychain.json'), PORTAL_NO_PROMPT: '1', PORTAL_NO_BROWSER: '1',
+    PORTAL_FIXTURE: join(dir, 'fixture.json') }
+  writeFileSync(join(dir, 'fixture.json'), '[]')
+
+  assert.match(run(dir, env, ['alias', 'ghw', 'GitHub Work']), /"ghw" → gh@company\.com · Chrome profile "GitHub Work", no Claude\/Codex account/)
+  assert.match(run(dir, env, ['alias', 'scratch', 'Scratch']), /"scratch" → Chrome "Scratch"/)
+  assert.match(run(dir, env, ['open', 'ghw', '--dry-run']), /--profile-directory=Profile 8"?$/m)
+  assert.match(run(dir, env, ['open', 'scratch', '--dry-run']), /--profile-directory=Profile 9"?$/m)
+  assert.match(run(dir, env, ['open', 'github', '--dry-run']), /--profile-directory=Profile 8/)
+  assert.match(run(dir, env, ['open', 'chatgpt', 'ghw', '--dry-run']), /Profile 8.* https:\/\/chatgpt\.com\/codex\/settings\/usage/)
+  assert.match(run(dir, env, ['login', 'gh', 'ghw', '--dry-run']), /send the sign-in page to Chrome "GitHub Work": run: gh auth login/)
+  assert.match(run(dir, env, ['login', 'gcloud', 'ghw', '--dry-run']), /gcloud auth login gh@company\.com/)
+  assert.match(run(dir, env, ['login', 'claude', 'ghw', '--dry-run']), /bring up Chrome "GitHub Work".*claude auth login --claudeai --email gh@company\.com/)
+  assert.match(run(dir, env, ['ghw']), /is the Chrome profile "GitHub Work" \(gh@company\.com\), with no Claude or Codex account/)
+
+  const list = run(dir, env, ['profiles'])
+  assert.match(list, /GitHub Work\s+gh@company\.com\s+ghw\s+—/, list)
+  assert.match(list, /Scratch\s+not signed in\s+scratch\s+—/, list)
+  assert.match(list, /Hash\s+hash@gmail\.com\s+hash\s+claude, codex/, list)
+
+  const nope = run(dir, env, ['open', 'nowhere', '--dry-run'], { allowExit: [] })
+  assert.equal(nope.code, 1)
+  assert.match(nope.out, /no account or Chrome profile matches "nowhere"[\s\S]*profiles: Hash, Work, Spare, GitHub Work, Scratch/)
 })

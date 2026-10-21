@@ -33,7 +33,9 @@ The rule portal plans by: use the account whose weekly budget resets soonest
    readings shown" line).
 
 Names, logins and sites are like aliases:
-- `portal name <name> <who>` — "work" now means that account.
+- `portal alias <name> <who>` — "work" now means that account. `<who>` can
+  also be a Chrome profile with no Claude/Codex account (e.g. a GitHub-only
+  work profile); `portal profiles` lists every profile with its names.
 - `portal recipe add <name> [--check="<cmd> whoami"] -- <command> {email}` —
   register a login (`{email}` is filled in per account); then
   `portal login <name> <who> [-- extra flags]`.

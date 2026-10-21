@@ -100,8 +100,15 @@ portal next | plan | schedule | history | watch | accounts | check
 
 Rows show each account by its address, shortened to what tells it apart: a
 Gmail's local part, or the domain of anything else. `<who>` is whatever you
-type to reach one: a name you gave (`portal name work acme`), or any part
-of an address, Chrome profile name or plan.
+type to reach one: a name you gave, or any part of an address, Chrome profile
+name or plan.
+
+```sh
+portal alias work acme                # "work" now means that account (Claude and Codex alike)
+portal alias gh-work "GitHub Work"    # a Chrome profile works too, even one with no Claude/Codex account
+portal open gh-work                   # then open it, or: portal login gh gh-work
+portal profiles                       # every Chrome profile: who it's signed in as, its names, its accounts
+```
 
 ### What the home screen tells you
 
