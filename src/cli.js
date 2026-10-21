@@ -1,6 +1,10 @@
 // portal: every Claude and Codex account in one place, and every account's
 // Chrome profile one command away.
 
+import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { profileFor, profiles, launch } from './chrome.js'
 import { keyOf, load, save } from './config.js'
 import { discover } from './discover.js'
@@ -19,6 +23,7 @@ import { accountsScreen, detail, historyScreen, planScreen, scheduleScreen } fro
 import { nameOf } from './ui/words.js'
 
 const WATCH_MIN_S = 60   // polling faster than this earns a 429
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 // Pages portal knows how to open. A site can be added like a name: portal site add mail https://mail.google.com
 const SITES = {
@@ -397,6 +402,19 @@ async function cmdCheck(ctx) {
   say(screen({ what: 'check', note: 'who each tool is signed in as', rows, headers: ['tool', 'signed in as', 'from'] }))
 }
 
+// --------------------------------------------------------------- update
+
+// The installer put a git checkout behind the `portal` link; updating is a
+// fast-forward pull of it, and nothing else.
+function cmdUpdate() {
+  if (!existsSync(join(ROOT, '.git'))) throw new Error(`${ROOT} isn't a git checkout · reinstall with the one-line installer (see README)`)
+  const before = spawnSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const r = spawnSync('git', ['-C', ROOT, 'pull', '--ff-only', '--quiet'], { stdio: 'inherit' })
+  if (r.status !== 0) throw new Error(`couldn't update ${ROOT} (local changes there?)`)
+  const after = spawnSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  say(before === after ? dim(`  already up to date (${after})`) : green(`  ✓ updated ${before} → ${after}`))
+}
+
 // ----------------------------------------------------------------- help
 
 const HELP = `
@@ -437,6 +455,7 @@ const HELP = `
     portal renews <who> <date>     when a Claude plan renews (Codex knows its own)
     portal hide <who> / show <who> keep an account off the screens  ${dim('(--hidden shows them)')}
     portal site add mail <url>     then: portal open mail work
+    portal update                  get the latest portal
 
   ${dim('<who> is a name you set, or any part of an address, Chrome profile name or plan.')}
   ${dim('Every number is what is left. --json for machines · --dry-run on open and login · --fresh to skip the 1-minute reuse')}
@@ -451,13 +470,14 @@ const COMMANDS = {
   setup: (ctx) => setup(ctx.cfg), name: cmdName, alias: cmdName, profile: cmdProfile, profiles: cmdProfile,
   hide: (ctx) => cmdHide(ctx, true), show: (ctx) => cmdHide(ctx, false), renews: cmdRenews,
   site: cmdSite, sites: cmdSite, recipe: cmdRecipe, recipes: cmdRecipe, check: cmdCheck, whoami: cmdCheck,
+  update: cmdUpdate,
 }
 
 export async function main(argv) {
   const { flags, rest, passthrough } = parseArgs(argv)
   FRESH = !!flags.fresh
   if (flags.help || flags.h || rest[0] === 'help') return say(HELP)
-  if (flags.version || flags.v) return say('portal 1.0.0')
+  if (flags.version || flags.v) return say(`portal ${JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version}`)
   try {
     const cfg = load()
     const { accounts } = discover(cfg)
