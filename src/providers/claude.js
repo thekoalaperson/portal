@@ -12,10 +12,9 @@
 // not on every run.
 
 import { readFile } from 'node:fs/promises'
-import { readSecret } from '../platform.js'
+import { claudeService, readSecret } from '../platform.js'
 import * as cache from '../cache.js'
 
-export const title = 'claude'
 export const urls = {
   chat: 'https://claude.ai/new',
   usage: 'https://claude.ai/settings/usage',
@@ -29,7 +28,7 @@ const EARLY_MS = 60_000   // a token this close to expiry is treated as expired
 
 async function readCred(cred) {
   let raw = null
-  if (cred.kind === 'keychain') raw = await readSecret(cred.service, cred.user)
+  if (cred.kind === 'keychain') raw = await readSecret(cred.service ?? claudeService(cred.dir), cred.user)
   else raw = await readFile(cred.path, 'utf8').catch(() => null)
   if (!raw) return null
   try {
@@ -56,12 +55,10 @@ const get = (url, token, signal) => fetch(url, {
   },
 })
 
-// Whose token this is: from the cache when this exact token was checked
-// before, else from the provider.
-async function identity(c, signal) {
-  const known = cache.identity(c.token)
-  if (known) return { status: 200, body: known }
-  const res = await get(PROFILE_URL, c.token, signal)
+// Whose token this is, from the provider. Remembered by the token's
+// fingerprint, so each token is asked about once.
+async function identity(token, signal) {
+  const res = await get(PROFILE_URL, token, signal)
   if (!res.ok) return { status: res.status, body: null }
   const p = await res.json()
   const body = {
@@ -69,7 +66,7 @@ async function identity(c, signal) {
     plan: p.organization?.organization_type ?? null,
     tier: p.organization?.rate_limit_tier ?? null,
   }
-  cache.rememberIdentity(c.token, body)
+  cache.rememberIdentity(token, body)
   return { status: 200, body }
 }
 
@@ -103,62 +100,46 @@ export function normalize(body) {
 
 const fresh = (c) => !c.expiresAt || c.expiresAt > Date.now() + EARLY_MS
 
+// A failed read says which of the account's credentials had expired, so the
+// caller can ask the official CLI to renew the ones it is allowed to.
+const signedOut = (expired = []) => ({ ok: false, inactive: true, expired: expired.length > 0, error: expired.length ? 'sign-in expired' : 'not signed in', expiredCreds: expired })
+
 export async function fetchUsage(account, { signal } = {}) {
   const read = (await Promise.all(account.creds.map(readCred))).filter(Boolean)
-  if (read.length === 0) {
-    return { ok: false, inactive: true, error: 'signed out', hint: `portal login claude ${account.names?.[0] ?? account.email.split('@')[0]}`, refreshable: [] }
-  }
   // Unexpired first, then the one that lasts longest.
   read.sort((a, b) => Number(fresh(b)) - Number(fresh(a)) || (b.expiresAt ?? 0) - (a.expiresAt ?? 0))
 
-  let found = null, who = null, expired = []
+  const expired = []
   for (const c of read) {
     if (!fresh(c)) { expired.push(c); continue }
-    let res
+    // A token checked before skips straight to its usage; a new one asks whose
+    // it is and for its usage at once, and the usage counts only if it's his.
+    const known = cache.identity(c.token)
+    let who, res
     try {
-      res = await identity(c, signal)
+      ;[who, res] = await Promise.all([
+        known ? { status: 200, body: known } : identity(c.token, signal),
+        get(USAGE_URL, c.token, signal),
+      ])
     } catch (err) {
       return { ok: false, error: `network: ${err.message}` }
     }
-    if (res.status === 401) { expired.push(c); continue }
-    if (!res.body) return { ok: false, error: `profile HTTP ${res.status}` }
+    if (who.status === 401 || res.status === 401) { cache.forget(c.token); expired.push(c); continue }
+    if (!who.body) return { ok: false, error: `profile HTTP ${who.status}` }
     // A token for someone else is no token.
-    if (res.body.email && res.body.email.toLowerCase() !== account.email) continue
-    found = c; who = res.body
-    break
-  }
-  if (!found) {
-    // Only the official CLI may renew a token; say which homes it could renew.
-    const refreshable = expired.filter(c => c.refresh).map(c => c.refresh)
-    return {
-      ok: false, inactive: true, expired: expired.length > 0,
-      error: expired.length ? 'sign-in expired' : 'not signed in',
-      hint: `portal login claude ${account.names?.[0] ?? account.email.split('@')[0]}`,
-      refreshable,
-    }
-  }
-
-  let body
-  try {
-    const res = await get(USAGE_URL, found.token, signal)
-    if (res.status === 401) {
-      cache.forget(found.token)
-      return { ok: false, inactive: true, expired: true, error: 'sign-in expired', refreshable: found.refresh ? [found.refresh] : [] }
-    }
+    if (who.body.email && who.body.email.toLowerCase() !== account.email) continue
     if (!res.ok) return { ok: false, error: `usage HTTP ${res.status}` }
-    body = await res.json()
-  } catch (err) {
-    return { ok: false, error: `network: ${err.message}` }
+    let body
+    try { body = await res.json() } catch (err) { return { ok: false, error: `usage: ${err.message}` } }
+    return {
+      ok: true,
+      signInUntil: c.signInUntil,
+      email: who.body.email ?? account.email,
+      plan: who.body.plan ?? c.subscription ?? account.plan,
+      tier: who.body.tier ?? account.tier,
+      windows: normalize(body),
+      source: c.source,
+    }
   }
-
-  return {
-    ok: true,
-    signInUntil: found.signInUntil,
-    email: who.email ?? account.email,
-    plan: who.plan ?? found.subscription ?? account.plan,
-    tier: who.tier ?? account.tier,
-    windows: normalize(body),
-    source: found.source,
-    raw: body,   // for --json; nothing else reads it
-  }
+  return signedOut(expired)
 }

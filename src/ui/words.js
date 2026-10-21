@@ -1,14 +1,17 @@
 // The words every screen shares: what an account is called, what its plan is
 // called, and what its verdict says. One place, so no two screens disagree.
 
-import { bold, clock, cyan, dim, dot, green, hrs, magenta, pace, red, relative, shortEmail, spanLabel, yellow } from './render.js'
+import { modelOf } from '../plan.js'
+import { clock, cyan, dim, dot, green, hrs, magenta, pace, plain, red, relative, shortEmail, spanLabel, yellow } from './render.js'
 
 // On screen an account is its address, shortened to what tells it apart
 // (a gmail's local part, anything else's domain). Names he chose are for
 // typing -- "portal open work" -- and show up in `portal accounts`.
 export const nameOf = (account) => shortEmail(account.email)
 // What to type to reach an account: a name he chose, else the short address.
-export const handleOf = (account) => account.names?.[0] ?? shortEmail(account.email)
+const handleOf = (account) => account.names[0] ?? shortEmail(account.email)
+// The one command that gives an account a working sign-in.
+export const signInCommand = (account) => `portal login ${account.provider} ${handleOf(account)}`
 
 // Providers name plans for their own billing systems; show what he'd call them.
 export function planName(usage, account) {
@@ -31,7 +34,7 @@ export function planName(usage, account) {
 export function windowLabel(kind) {
   if (kind === '5h') return '5 hours'
   if (kind === 'weekly') return 'this week'
-  if (kind.startsWith('weekly:')) return `week · ${kind.slice(7).toLowerCase()}`
+  if (kind.startsWith('weekly:')) return `week · ${modelOf(kind)}`
   if (kind.startsWith('monthly')) return 'this month'
   return kind
 }
@@ -48,14 +51,14 @@ export function paceOrigin(a) {
 // table cell, and a clause for the line under "use".
 const VERDICTS = {
   unreadable: { live: false, short: () => 'not read live',
-    long: (a) => `${Math.round(a.left)}% left` + (a.resetAt ? ` until ${clock(a.resetAt)}` : '') + dim(` · as of ${relative(a.state.at).replace(/\x1b\[[0-9;]*m/g, '')}`) },
+    long: (a) => `${Math.round(a.left)}% left` + (a.resetAt ? ` until ${clock(a.resetAt)}` : '') + dim(` · as of ${plain(relative(a.state.at))}`) },
   'not-started': { live: false, short: () => 'starts on first use', long: () => 'its week starts when you first use it' },
   empty: { live: false, short: () => 'empty', long: () => 'nothing left' },
   unknown: { live: false, short: () => 'no reset time', long: () => 'no reset time known' },
   'no-pace': { live: true, short: () => 'in use', long: () => 'in use · pace in ~15 min' },
   'no-readings': { live: true, short: () => 'measuring', long: () => 'measuring its pace' },
   unused: { live: false,
-    short: (a) => a.severity === 'none' ? 'idle' : `idle · ${Math.round(a.left)}% unused at reset`,
+    short: (a) => a.severity === 'none' ? 'idle' : `${Math.round(a.left)}% unused at reset`,
     long: (a) => a.severity === 'none' ? `idle · ${Math.round(a.left)}% left, too little to chase`
       : `idle → all ${Math.round(a.left)}% goes unused at reset unless you use it` },
   wasting: { live: true,
@@ -65,8 +68,8 @@ const VERDICTS = {
     short: () => 'on track',
     long: (a) => green('on track to use it all') + dim(` by ${clock(a.resetAt)}`) },
   overrun: { live: true,
-    short: (a) => `dry in ${hrs(a.dryInHours)}`,
-    long: (a) => red(`runs dry ~${clock(Date.now() + a.dryInHours * 3600_000)}`) + dim(`, ${hrs(a.hoursToReset - a.dryInHours)} before it resets`) },
+    short: (a) => `dry ~${clock(a.dryAt)}`,
+    long: (a) => red(`runs dry ~${clock(a.dryAt)}`) + dim(`, ${hrs(a.hoursToReset - a.dryInHours)} before it resets`) },
 }
 
 export const colorOf = (a) => a.verdict === 'overrun' ? red : { good: green, warn: yellow, none: dim }[a.severity]
@@ -76,10 +79,12 @@ export function verdictLong(a) {
   return VERDICTS[a.verdict].long(a)
 }
 
+// The verdict in a few words, coloured, for a table cell or a row note.
+export const verdictShort = (a) => colorOf(a)(VERDICTS[a.verdict].short(a))
+
 export function verdictDot(a) {
   if (a.locked) return dot(red, red('locked') + (a.unlockAt ? dim(` · back ${clock(a.unlockAt)}`) : ''), { live: false })
-  const v = VERDICTS[a.verdict], color = colorOf(a)
-  return dot(color, color(v.short(a)), { live: v.live })
+  return dot(colorOf(a), verdictShort(a), { live: VERDICTS[a.verdict].live })
 }
 
 // "1 banked reset" -- green when it can be used this minute, cyan when not yet.
@@ -100,4 +105,3 @@ export function creditsNote(usage, { long = false } = {}) {
   return magenta(creditsText(c)) + reach
 }
 
-export const describeWho = (a) => bold(nameOf(a.account))

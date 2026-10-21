@@ -6,67 +6,63 @@
 // Chrome profile is signed into which address) is discovered on every run
 // instead of being written down here, so it never goes stale.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
 import { CONFIG, LEGACY } from './paths.js'
+import { readJson, writeJson } from './platform.js'
 
 const EMPTY = () => ({
   version: 1,
-  // Accounts portal signed in itself: { provider, email, home, chrome? }.
+  // Accounts portal signed in itself ({ provider, email, home }), and every
+  // other account this machine has seen ({ provider, email }) -- so a config
+  // carried to a new computer knows what to sign in there.
   accounts: [],
-  // name -> email. A name means a person, so it reaches their Claude and Codex accounts alike.
+  // name -> email, or -> { profile } for a Chrome profile signed into none.
+  // A name means a person, so it reaches their Claude and Codex accounts alike.
   names: {},
-  // email -> Chrome profile directory, for an address no profile is signed into.
+  // email -> Chrome profile name, for an address no profile is signed into.
   chrome: {},
   // "provider:email" -> ISO date. Claude does not say when a plan renews, so it is typed in once.
   renews: {},
   // "provider:email" keys left off every screen.
   hidden: [],
-  // name -> URL, for `portal open <site> <who>`.
+  // name -> URL (or { url, who }), for `portal open <site> <who>`.
   sites: {},
   // name -> { run: [...argv], check?: [...argv], browser?: 'env' | 'focus' }.
   recipes: {},
   // Where accounts are discovered from. 'auto' uses a source when it is present.
   sources: { orca: 'auto', default: 'auto' },
-  setupDone: false,
 })
 
-let cached = null
-
 export function load() {
-  if (cached) return cached
   let raw = null
   try {
     raw = JSON.parse(readFileSync(CONFIG, 'utf8'))
   } catch (err) {
     if (err.code !== 'ENOENT') throw new Error(`could not read ${CONFIG}: ${err.message}`)
   }
-  const cfg = { ...EMPTY(), ...(raw ?? {}) }
+  // Every field is there and the right shape from here on, hand-edited or not,
+  // so nothing downstream has to guard against a missing or null one.
+  const cfg = EMPTY()
+  for (const [k, v] of Object.entries(raw ?? {})) {
+    if (!(k in cfg) || (v != null && Array.isArray(v) === Array.isArray(cfg[k]) && typeof v === typeof cfg[k])) cfg[k] = v
+  }
   cfg.exists = raw != null
   if (!raw) migrateLegacy(cfg)
-  cached = cfg
   return cfg
 }
 
-export function save(cfg = cached) {
+export function save(cfg) {
   const { exists, ...plain } = cfg
-  mkdirSync(dirname(CONFIG), { recursive: true })
-  const tmp = `${CONFIG}.${process.pid}.tmp`
-  writeFileSync(tmp, JSON.stringify(plain, null, 2) + '\n')
-  renameSync(tmp, CONFIG)
+  writeJson(CONFIG, plain, { pretty: true })
   cfg.exists = true
-  cached = cfg
 }
 
 // basketstar kept names in a file of its own; carry them over the first time.
 function migrateLegacy(cfg) {
   if (!existsSync(LEGACY.aliases)) return
-  try {
-    const old = JSON.parse(readFileSync(LEGACY.aliases, 'utf8'))
-    for (const [name, email] of Object.entries(old)) {
-      if (typeof email === 'string') cfg.names[name.toLowerCase()] = email.toLowerCase()
-    }
-  } catch { /* an unreadable old file is not worth stopping for */ }
+  for (const [name, email] of Object.entries(readJson(LEGACY.aliases) ?? {})) {
+    if (typeof email === 'string') cfg.names[name.toLowerCase()] = email.toLowerCase()
+  }
 }
 
 export const keyOf = (provider, email) => `${provider}:${String(email).toLowerCase()}`

@@ -1,14 +1,14 @@
 // The few questions portal ever asks, and only on a terminal. Every question
 // has a default that Enter accepts, so the common path is Enter, Enter, done.
 
-import { createInterface } from 'node:readline/promises'
 import { bold, dim } from './render.js'
 
 export const interactive = () => process.stdin.isTTY && process.stdout.isTTY && !process.env.PORTAL_NO_PROMPT
 
+// readline loads only when a question is actually asked.
 let rl = null
-function line() {
-  rl ??= createInterface({ input: process.stdin, output: process.stdout })
+async function line() {
+  rl ??= (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout })
   return rl
 }
 export function close() {
@@ -23,7 +23,7 @@ export async function ask(question, fallback = '') {
   const hint = fallback ? dim(` [${fallback}]`) : ''
   let answer
   try {
-    answer = (await line().question(`  ${question}${hint} `)).trim()
+    answer = (await (await line()).question(`  ${question}${hint} `)).trim()
   } catch {
     close()
     throw new Stopped('stopped')
@@ -31,10 +31,10 @@ export async function ask(question, fallback = '') {
   return answer || fallback
 }
 
-export async function yes(question, fallback = true) {
-  const answer = (await ask(question + dim(fallback ? ' (Y/n)' : ' (y/N)'))).toLowerCase()
-  if (!answer) return fallback
-  return answer.startsWith('y')
+// Yes unless he says otherwise.
+export async function yes(question) {
+  const answer = (await ask(question + dim(' (Y/n)'))).toLowerCase()
+  return !answer || answer.startsWith('y')
 }
 
 // Pick one of a list by number; Enter takes the default.

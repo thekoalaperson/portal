@@ -7,18 +7,15 @@
 //   node --test test/                      run everything
 //   SHOW=overrun node --test test/         also print that scenario's home screen
 
-import { test } from 'node:test'
+import { describe, it, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const H = 3_600_000
-const jwt = (claims) => `x.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.y`
+import { SCHEMA } from '../src/store.js'
+import { H, cleanEnv, jwt, root, runPortal } from './helpers.mjs'
 
 const PEOPLE = {
   hash: 'hash@gmail.com',
@@ -76,9 +73,7 @@ const codexUsage = ({ weekly, blocked, unstarted, resets, credits }) => ({
 // Backdated readings, one every 20 minutes over 8 hours, at a steady pace.
 function seed(db, provider, email, kind, { usedNow, rate, peak, session, sessionRate }) {
   const d = new DatabaseSync(db)
-  d.exec(`CREATE TABLE IF NOT EXISTS samples (ts INTEGER NOT NULL, provider TEXT NOT NULL, account_id TEXT NOT NULL,
-    email TEXT NOT NULL, kind TEXT NOT NULL, used_percent REAL NOT NULL, reset_at INTEGER, PRIMARY KEY (ts, account_id, kind));
-    CREATE INDEX IF NOT EXISTS idx_samples_person ON samples (provider, email, kind, ts DESC);`)
+  d.exec(SCHEMA)
   const ins = d.prepare('INSERT OR REPLACE INTO samples VALUES (?, ?, ?, ?, ?, ?, ?)')
   const now = Date.now()
   for (let i = 24; i >= 1; i--) {
@@ -94,20 +89,6 @@ function seed(db, provider, email, kind, { usedNow, rate, peak, session, session
     ins.run(t0 + H, provider, `${provider}:${email}`, email, kind, 10 + peak, null)
   }
   d.close()
-}
-
-// The machine's own logins must not leak in: orca's terminals set these.
-const { CODEX_HOME, CLAUDE_CONFIG_DIR, ...cleanEnv } = process.env
-
-function run(dir, env, args, { allowExit = [] } = {}) {
-  try {
-    return execFileSync(process.execPath, [join(root, 'bin/portal'), ...args], {
-      env: { ...cleanEnv, ...env, NO_COLOR: '1', FORCE_COLOR: '', COLUMNS: '92' }, encoding: 'utf8',
-    })
-  } catch (err) {
-    if (allowExit.includes(err.status)) return err.stdout ?? ''
-    return { failed: true, code: err.status, out: (err.stdout ?? '') + (err.stderr ?? '') }
-  }
 }
 
 // Chrome's own record of its profiles, one per person, as Chrome writes it.
@@ -142,8 +123,11 @@ const SCENARIOS = {
   expired:  { hash: { expired: true }, expect: [/claude\s+use (company\.com|spare)/] },
 }
 
+// Scenarios are independent (each has its own home and database), so they
+// run side by side; each one's own commands run one after another.
+describe('scenarios', { concurrency: true }, () => {
 for (const [name, sc] of Object.entries(SCENARIOS)) {
-  test(`scenario: ${name}`, () => {
+  it(`scenario: ${name}`, async () => {
     const dir = mkdtempSync(join(tmpdir(), `portal-${name}-`))
     const { home, portal } = machine(dir)
     const db = join(dir, 'history.db')
@@ -166,38 +150,40 @@ for (const [name, sc] of Object.entries(SCENARIOS)) {
     writeFileSync(join(dir, 'fixture.json'), JSON.stringify(fixture))
     const env = { HOME: home, PORTAL_HOME: portal, PORTAL_DB: db, PORTAL_FIXTURE: join(dir, 'fixture.json'), PORTAL_FAKE_KEYCHAIN: join(dir, 'keychain.json'), PORTAL_NO_PROMPT: '1' }
 
+    let homeScreen
     for (const args of SCREENS) {
-      const out = run(dir, env, args, { allowExit: args[0] === 'next' ? [1] : [] })
+      const out = await runPortal(env, args, { allowExit: args[0] === 'next' ? [1] : [] })
       assert.ok(typeof out === 'string', `portal ${args.join(' ')} failed (${out.code}):\n${out.out}`)
       assert.doesNotMatch(out, /undefined|NaN|\[object|null%/, `portal ${args.join(' ')} leaked a bad value:\n${out}`)
+      homeScreen ??= out   // SCREENS starts with the home screen
     }
-    const homeScreen = run(dir, env, [])
     if (process.env.SHOW === name) console.log(homeScreen)
     for (const re of sc.expect) assert.match(homeScreen, re, `${name}: expected ${re}\n${homeScreen}`)
     for (const re of sc.reject ?? []) assert.doesNotMatch(homeScreen, re, `${name}: did not expect ${re}\n${homeScreen}`)
   })
 }
+})
 
-test('a fresh machine with nothing on it says how to start', () => {
+test('a fresh machine with nothing on it says how to start', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'portal-fresh-'))
   const home = join(dir, 'home')
   mkdirSync(home)
   writeFileSync(join(dir, 'keychain.json'), '{}')
   const env = { HOME: home, PORTAL_HOME: join(dir, 'portal'), PORTAL_FAKE_KEYCHAIN: join(dir, 'keychain.json'), PORTAL_NO_PROMPT: '1' }
-  const out = run(dir, env, [])
+  const out = await runPortal(env, [])
   assert.ok(typeof out === 'string', JSON.stringify(out))
   assert.match(out, /no accounts yet · run `portal setup`/)
-  const setupOut = run(dir, env, ['setup'])
+  const setupOut = await runPortal(env, ['setup'])
   assert.ok(typeof setupOut === 'string', JSON.stringify(setupOut))
   assert.match(setupOut, /found on this machine/)
   assert.match(setupOut, /claude\s+none yet/)
   for (const args of [['help'], ['accounts'], ['next'], ['check'], ['recipe'], ['site']]) {
-    const o = run(dir, env, args)
+    const o = await runPortal(env, args)
     assert.ok(typeof o === 'string' || o.code === 1, `portal ${args.join(' ')} crashed on a fresh machine:\n${o.out}`)
   }
 })
 
-test('a fresh machine with only the default logins finds them without setup', () => {
+test('a fresh machine with only the default logins finds them without setup', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'portal-defaults-'))
   const home = join(dir, 'home')
   mkdirSync(join(home, '.codex'), { recursive: true })
@@ -210,7 +196,7 @@ test('a fresh machine with only the default logins finds them without setup', ()
     { provider: 'codex', email: 'solo@gmail.com', usage: codexUsage({ weekly: { used: 5, resetH: 100 } }) },
   ]))
   const env = { HOME: home, PORTAL_HOME: join(dir, 'portal'), PORTAL_FIXTURE: join(dir, 'fixture.json'), PORTAL_FAKE_KEYCHAIN: join(dir, 'keychain.json'), PORTAL_NO_PROMPT: '1' }
-  const out = run(dir, env, [])
+  const out = await runPortal(env, [])
   assert.ok(typeof out === 'string', JSON.stringify(out))
   assert.match(out, /claude\s+use solo/)
   assert.match(out, /codex\s+use solo/)
@@ -258,7 +244,7 @@ echo "Successfully logged in"
     { provider: 'claude', email: PEOPLE.hash, usage: claudeUsage({ weekly: { used: 10, resetH: 50 } }) },
     { provider: 'codex', email: PEOPLE.work, usage: codexUsage({ weekly: { used: 5, resetH: 100 } }) },
   ]))
-  const after = execFileSync(process.execPath, [join(root, 'bin/portal'), 'accounts'], { env: { ...env, PORTAL_FIXTURE: join(dir, 'fixture.json'), PORTAL_NO_PROMPT: '1' }, encoding: 'utf8' })
+  const after = await runPortal({ ...env, PORTAL_FIXTURE: join(dir, 'fixture.json'), PORTAL_NO_PROMPT: '1' }, ['accounts'])
   assert.match(after, /hash\s+—|hash\s+hash/)
   assert.match(after, /company\.com/)
   assert.match(after, /portal sign-in/)
@@ -285,7 +271,7 @@ function converse(argv, env, answers) {
 // A new computer with the config carried over from the old one (dotfiles):
 // the accounts it names have no sign-in folder here yet. They must still show
 // up as his accounts, and setup must say exactly how to sign each one in.
-test('a new computer with a carried-over config lists what to sign in', () => {
+test('a new computer with a carried-over config lists what to sign in', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'portal-carried-'))
   const home = join(dir, 'home'), portal = join(dir, 'portal')
   mkdirSync(home, { recursive: true })
@@ -302,27 +288,27 @@ test('a new computer with a carried-over config lists what to sign in', () => {
     recipes: { vpn: { run: ['vpnctl', 'login'], browser: 'focus' } },
   }))
   const env = { HOME: home, PORTAL_HOME: portal, PORTAL_FAKE_KEYCHAIN: join(dir, 'keychain.json'), PORTAL_NO_PROMPT: '1', PORTAL_NO_BROWSER: '1' }
-  const setupOut = run(dir, env, ['setup'])
+  const setupOut = await runPortal(env, ['setup'])
   assert.ok(typeof setupOut === 'string', JSON.stringify(setupOut))
   assert.match(setupOut, /2 of 2 can't be read live/, setupOut)
   assert.match(setupOut, /portal login claude hash\s+hash@gmail\.com · opens in Chrome "Hash"/, setupOut)
   assert.match(setupOut, /portal login codex work\s+me@company\.com · opens in Chrome "Work"/, setupOut)
-  const home1 = run(dir, env, [])
+  const home1 = await runPortal(env, [])
   assert.ok(typeof home1 === 'string', JSON.stringify(home1))
   assert.match(home1, /not signed in/, home1)
-  const dry = run(dir, env, ['login', 'claude', 'hash', '--dry-run'])
+  const dry = await runPortal(env, ['login', 'claude', 'hash', '--dry-run'])
   assert.match(dry, /claude auth login --claudeai --email hash@gmail\.com/, dry)
   // A brand-new account, named by address or by Chrome profile, with no questions asked.
-  const byAddress = run(dir, env, ['login', 'codex', 'spare@gmail.com', '--dry-run'])
+  const byAddress = await runPortal(env, ['login', 'codex', 'spare@gmail.com', '--dry-run'])
   assert.match(byAddress, /bring up Chrome "Spare", then run: CODEX_HOME=.* codex login/, byAddress)
-  const byProfile = run(dir, env, ['login', 'claude', 'Spare', '--dry-run'])
+  const byProfile = await runPortal(env, ['login', 'claude', 'Spare', '--dry-run'])
   assert.match(byProfile, /claude auth login --claudeai --email spare@gmail\.com/, byProfile)
 })
 
 // Chrome profiles are somewhere to open a page or run a login even when they
 // hold no Claude or Codex account: a GitHub-only work profile, or one not
 // signed into Google at all. They can be named, opened, and logged in from.
-test('Chrome profiles without an AI account can be named, opened and used for logins', () => {
+test('Chrome profiles without an AI account can be named, opened and used for logins', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'portal-profiles-'))
   const { home, portal } = machine(dir)
   const state = join(home, 'Library/Application Support/Google/Chrome/Local State')
@@ -334,23 +320,23 @@ test('Chrome profiles without an AI account can be named, opened and used for lo
     PORTAL_FIXTURE: join(dir, 'fixture.json') }
   writeFileSync(join(dir, 'fixture.json'), '[]')
 
-  assert.match(run(dir, env, ['alias', 'ghw', 'GitHub Work']), /"ghw" → gh@company\.com · Chrome profile "GitHub Work", no Claude\/Codex account/)
-  assert.match(run(dir, env, ['alias', 'scratch', 'Scratch']), /"scratch" → Chrome "Scratch"/)
-  assert.match(run(dir, env, ['open', 'ghw', '--dry-run']), /--profile-directory=Profile 8"?$/m)
-  assert.match(run(dir, env, ['open', 'scratch', '--dry-run']), /--profile-directory=Profile 9"?$/m)
-  assert.match(run(dir, env, ['open', 'github', '--dry-run']), /--profile-directory=Profile 8/)
-  assert.match(run(dir, env, ['open', 'chatgpt', 'ghw', '--dry-run']), /Profile 8.* https:\/\/chatgpt\.com\/codex\/settings\/usage/)
-  assert.match(run(dir, env, ['login', 'gh', 'ghw', '--dry-run']), /send the sign-in page to Chrome "GitHub Work": run: gh auth login/)
-  assert.match(run(dir, env, ['login', 'gcloud', 'ghw', '--dry-run']), /gcloud auth login gh@company\.com/)
-  assert.match(run(dir, env, ['login', 'claude', 'ghw', '--dry-run']), /bring up Chrome "GitHub Work".*claude auth login --claudeai --email gh@company\.com/)
-  assert.match(run(dir, env, ['ghw']), /is the Chrome profile "GitHub Work" \(gh@company\.com\), with no Claude or Codex account/)
+  assert.match(await runPortal(env, ['alias', 'ghw', 'GitHub Work']), /"ghw" → gh@company\.com · Chrome profile "GitHub Work", no Claude\/Codex account/)
+  assert.match(await runPortal(env, ['alias', 'scratch', 'Scratch']), /"scratch" → Chrome "Scratch"/)
+  assert.match(await runPortal(env, ['open', 'ghw', '--dry-run']), /--profile-directory=Profile 8"?$/m)
+  assert.match(await runPortal(env, ['open', 'scratch', '--dry-run']), /--profile-directory=Profile 9"?$/m)
+  assert.match(await runPortal(env, ['open', 'github', '--dry-run']), /--profile-directory=Profile 8/)
+  assert.match(await runPortal(env, ['open', 'chatgpt', 'ghw', '--dry-run']), /Profile 8.* https:\/\/chatgpt\.com\/codex\/settings\/usage/)
+  assert.match(await runPortal(env, ['login', 'gh', 'ghw', '--dry-run']), /send the sign-in page to Chrome "GitHub Work": run: gh auth login/)
+  assert.match(await runPortal(env, ['login', 'gcloud', 'ghw', '--dry-run']), /gcloud auth login gh@company\.com/)
+  assert.match(await runPortal(env, ['login', 'claude', 'ghw', '--dry-run']), /bring up Chrome "GitHub Work".*claude auth login --claudeai --email gh@company\.com/)
+  assert.match(await runPortal(env, ['ghw']), /is the Chrome profile "GitHub Work" \(gh@company\.com\), with no Claude or Codex account/)
 
-  const list = run(dir, env, ['profiles'])
+  const list = await runPortal(env, ['profiles'])
   assert.match(list, /GitHub Work\s+gh@company\.com\s+ghw\s+—/, list)
   assert.match(list, /Scratch\s+not signed in\s+scratch\s+—/, list)
   assert.match(list, /Hash\s+hash@gmail\.com\s+hash\s+claude, codex/, list)
 
-  const nope = run(dir, env, ['open', 'nowhere', '--dry-run'], { allowExit: [] })
+  const nope = await runPortal(env, ['open', 'nowhere', '--dry-run'])
   assert.equal(nope.code, 1)
   assert.match(nope.out, /no account or Chrome profile matches "nowhere"[\s\S]*profiles: Hash, Work, Spare, GitHub Work, Scratch/)
 })

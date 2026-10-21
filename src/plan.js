@@ -24,7 +24,7 @@ import * as store from './store.js'
 
 // Tuning, with the reason beside each value.
 export const LOCK_AT = 100          // % used at which a window is dry -- the providers serve right up to the limit
-export const WASTE_NOTICE = 10      // % of budget; below this, waste is a fact, not a warning
+const WASTE_NOTICE = 10      // % of budget; below this, waste is a fact, not a warning
 export const GAP_NOTICE_H = 0.25    // a hole shorter than this is not a hole
 const OVERRUN_MARGIN_H = 0.5        // landing this close to reset counts as on track
 const THROTTLE_NOTICE_H = 0.25      // a throttle lock this close to its own reset is not worth a line
@@ -32,16 +32,18 @@ const SESSION_H = 5
 
 // Windows are keyed '5h' | 'weekly' | 'weekly:<model>' | 'monthly:overage'.
 // The ones without a scope are the account-wide limits.
-export const kindBase = (kind) => kind.split(':')[0]
+const kindBase = (kind) => kind.split(':')[0]
+// The model a 'weekly:<model>' cap is for, as he'd write it: "fable".
+export const modelOf = (kind) => kind.split(':')[1]?.toLowerCase() ?? ''
 export const isTopLevel = (w) => !w.kind.includes(':')
 export const leftOf = (w) => Math.max(0, 100 - w.usedPercent)
-const windowOf = (usage, kind) => (usage.windows ?? []).find(w => w.kind === kind) ?? null
+export const windowOf = (usage, kind) => (usage.windows ?? []).find(w => w.kind === kind) ?? null
 
 // The weekly budget that binds: the most-spent of the weekly limits. A model
 // cap (e.g. Fable only, 68% used) runs out before the all-models week (43%)
 // when that model is the one being used, so planning on the all-models number
 // promises budget that is not there.
-export function budgetWindow(usage) {
+function budgetWindow(usage) {
   const weekly = (usage.windows ?? []).filter(w => kindBase(w.kind) === 'weekly')
   if (weekly.length === 0) return null
   return weekly.reduce((a, b) => b.usedPercent > a.usedPercent ? b : a)
@@ -53,10 +55,15 @@ export function budgetWindow(usage) {
 //   unreadable  no working token; the last reading is replayed indefinitely
 //   none        nothing to show at all
 export function readState(usage) {
-  if (!usage.ok) return { kind: 'none', note: usage.hint ?? usage.error ?? 'no reading' }
+  if (!usage.ok) return { kind: 'none' }
   if (!usage.stale) return { kind: 'live' }
   return { kind: usage.expired || usage.inactive ? 'unreadable' : 'replay', at: usage.staleAt }
 }
+
+// Whether a read failed for want of a working sign-in -- something only a
+// login fixes -- rather than a provider not answering for a moment. Providers
+// mark the first as `inactive`; this is the one place that reads it.
+export const needsSignIn = (usage) => usage.inactive === true
 
 const isLocked = (usage) =>
   !!usage.blocked || (usage.windows ?? []).some(w => isTopLevel(w) && w.usedPercent >= LOCK_AT)
@@ -76,14 +83,14 @@ export const isUsable = (a) => !a.locked && a.left > 0
 // reset), until the budget runs out or the week resets.
 function simulate({ left, doing, hoursToReset, sessionRate, sessionLeft, sessionResetInHours }) {
   const canThrottle = sessionRate > 0 && sessionLeft != null && sessionResetInHours != null
-  let t = 0, wl = left, paused = 0
+  let t = 0, wl = left
   let sl = sessionLeft ?? Infinity
   let sReset = sessionResetInHours ?? Infinity
 
   for (let guard = 0; guard < 400 && t < hoursToReset && wl > 0; guard++) {
     if (canThrottle && sl <= 0) {
       const wait = Math.min(sReset, hoursToReset) - t
-      if (wait > 0) { paused += wait; t += wait }
+      if (wait > 0) t += wait
       sl = 100; sReset = Math.max(sReset, t) + SESSION_H
       continue
     }
@@ -100,7 +107,6 @@ function simulate({ left, doing, hoursToReset, sessionRate, sessionLeft, session
   return {
     dryAtHours: wl <= 0.01 ? t : null,
     leftAtReset: wl <= 0.01 ? 0 : Math.max(0, wl),
-    pausedHours: paused,
   }
 }
 
@@ -142,7 +148,7 @@ function analyze(account, usage) {
 
   // What happens at reset if nothing changes. Finishing right at reset is the
   // target, so "dry" only counts if it lands clearly before the reset.
-  let verdict, waste = 0, dryInHours = null, pausedHours = 0
+  let verdict, waste = 0, dryInHours = null
   if (w.startsOnUse) verdict = 'not-started'   // no clock, so nothing to pace or waste
   else if (state.kind === 'unreadable') {
     // No current pace to judge by, so no verdict. But for planning the chain,
@@ -161,7 +167,6 @@ function analyze(account, usage) {
   else if (doing === 0) { verdict = 'unused'; waste = left }
   else {
     const sim = simulate({ left, doing, hoursToReset, sessionRate: r.sessionRate, sessionLeft, sessionResetInHours })
-    pausedHours = sim.pausedHours
     if (sim.dryAtHours != null && sim.dryAtHours < hoursToReset - OVERRUN_MARGIN_H) {
       verdict = 'overrun'; dryInHours = sim.dryAtHours
     } else {
@@ -180,7 +185,8 @@ function analyze(account, usage) {
     doing, doingSource: r.pace?.source ?? null, paceSpanHours: r.pace?.spanHours ?? 0, ceiling,
     locked, throttled, unlockAt: locked ? unlockAt(usage) : null,
     sessionDryInHours, sessionResetAt: session?.resetAt ?? null,
-    verdict, severity, waste, dryInHours, pausedHours, impossible, unavoidableWaste,
+    verdict, severity, waste, dryInHours, dryAt: dryInHours != null ? now + dryInHours * store.HOUR_MS : null,
+    impossible, unavoidableWaste,
   }
 }
 
@@ -244,11 +250,18 @@ function providerPlan(analyses) {
   }
   if (change) change.to = steps[1]?.a ?? null
 
+  // The one order every screen lists accounts in: what to use, in order; then
+  // locked ones by when they come back; then whatever is left, soonest reset first.
+  const inChain = new Set(steps.map(s => s.a))
+  const rest = analyses.filter(a => !inChain.has(a))
+  const ordered = [
+    ...steps.map(s => s.a),
+    ...rest.filter(a => a.locked).sort((x, y) => (x.unlockAt ?? x.resetAt ?? Infinity) - (y.unlockAt ?? y.resetAt ?? Infinity)),
+    ...rest.filter(a => !a.locked).sort((x, y) => (x.resetAt ?? Infinity) - (y.resetAt ?? Infinity)),
+  ]
+
   return {
-    analyses,
-    // The one ordering the planning views use: what to use, in order, then the rest.
-    ordered: [...steps.map(s => s.a), ...analyses.filter(a => !steps.some(s => s.a === a))],
-    steps, next, also: before.slice(1), gapHours, bridgePace, change,
+    analyses, ordered, steps, next, gapHours, bridgePace, change,
     // A chain timed on peak pace rather than measured pace is a what-if.
     speculative: steps.some(s => !(s.a.doing > 0) && s.a.ceiling),
   }

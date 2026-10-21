@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DB, LEGACY } from './paths.js'
+import { UNSTARTED_SLACK_S } from './providers/codex.js'
 
 export const HOUR_MS = 60 * 60 * 1000
 const WEEK_MS = 7 * 24 * HOUR_MS
@@ -25,26 +26,28 @@ const THIN_POINTS = 5                // ...unless it moved this many points
 const RESET_DROP = 2                 // a fall of this many points means the window reset
 const STALE_LIMIT_MS = HOUR_MS       // beyond this, an old reading of a live account is noise
 
+export const SCHEMA = `
+  CREATE TABLE IF NOT EXISTS samples (
+    ts           INTEGER NOT NULL,
+    provider     TEXT    NOT NULL,
+    account_id   TEXT    NOT NULL,
+    email        TEXT    NOT NULL,
+    kind         TEXT    NOT NULL,
+    used_percent REAL    NOT NULL,
+    reset_at     INTEGER,
+    PRIMARY KEY (ts, account_id, kind)
+  );
+  CREATE INDEX IF NOT EXISTS idx_samples_person
+    ON samples (provider, email, kind, ts DESC);
+`
+
 let db
 function open() {
   if (db) return db
   mkdirSync(dirname(DB), { recursive: true })
   const fresh = !existsSync(DB)
   db = new DatabaseSync(DB)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS samples (
-      ts           INTEGER NOT NULL,
-      provider     TEXT    NOT NULL,
-      account_id   TEXT    NOT NULL,
-      email        TEXT    NOT NULL,
-      kind         TEXT    NOT NULL,
-      used_percent REAL    NOT NULL,
-      reset_at     INTEGER,
-      PRIMARY KEY (ts, account_id, kind)
-    );
-    CREATE INDEX IF NOT EXISTS idx_samples_person
-      ON samples (provider, email, kind, ts DESC);
-  `)
+  db.exec(SCHEMA)
   if (fresh && !process.env.PORTAL_HOME) importLegacy(db)
   return db
 }
@@ -66,7 +69,8 @@ function importLegacy(d) {
 // One transaction for a whole poll. Replayed readings are skipped -- writing
 // them back as if fresh would flatten the burn-rate curve with points that
 // never happened. Old rows go at the same time, so the table has a ceiling.
-export function recordMany(results, at = Date.now()) {
+export function recordMany(results) {
+  const at = Date.now()
   const d = open()
   const insert = d.prepare(
     `INSERT OR REPLACE INTO samples
@@ -74,13 +78,11 @@ export function recordMany(results, at = Date.now()) {
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
   d.exec('BEGIN')
-  let n = 0
   try {
     for (const { account, usage } of results) {
       if (!usage.ok || usage.stale) continue
       for (const w of usage.windows) {
         insert.run(at, account.provider, account.key, account.email.toLowerCase(), w.kind, w.usedPercent, w.resetAt ?? null)
-        n++
       }
     }
     d.prepare(`DELETE FROM samples WHERE ts < ?`).run(at - KEEP_MS)
@@ -89,7 +91,6 @@ export function recordMany(results, at = Date.now()) {
     d.exec('ROLLBACK')
     throw err
   }
-  return n
 }
 
 // History belongs to a person at a provider, not to any tool's account id:
@@ -268,7 +269,7 @@ function lastReading(account) {
 // the reading; those are recognised the same way.
 function startsOnUse(account, kind, used, resetAt, at) {
   return account.provider === 'codex' && kind === 'weekly' && used === 0 &&
-    (resetAt == null || Math.abs(resetAt - at - WEEK_MS) < 2 * 60 * 1000)
+    (resetAt == null || Math.abs(resetAt - at - WEEK_MS) < UNSTARTED_SLACK_S * 1000)
 }
 
 // A window whose reset time has passed since the reading was taken is empty
@@ -278,12 +279,12 @@ function rollOver(w, provider) {
   if (!w.resetAt || w.resetAt > Date.now()) return w
   // A Codex week, like every 5-hour window, starts again only on first use.
   if (provider === 'codex' && w.kind === 'weekly') {
-    return { ...w, usedPercent: 0, resetAt: null, startsOnUse: true, rolled: true, rolledAt: w.resetAt }
+    return { ...w, usedPercent: 0, resetAt: null, startsOnUse: true }
   }
   const weekly = w.kind.split(':')[0] === 'weekly'
   let next = w.resetAt
   if (weekly) while (next <= Date.now()) next += WEEK_MS
-  return { ...w, usedPercent: 0, resetAt: weekly ? next : null, rolled: true, rolledAt: w.resetAt }
+  return { ...w, usedPercent: 0, resetAt: weekly ? next : null }
 }
 
 // What an account's last reading means now, for when a live read is not
@@ -299,8 +300,8 @@ export function replay(account, { inactive }) {
 }
 
 // What was left on one window over recent readings, oldest first, for a sparkline.
-export function trail(account, kind, sinceMs = 24 * HOUR_MS) {
-  return series(account, kind, Date.now() - sinceMs).map(r => Math.max(0, 100 - r.used))
+export function trail(account, kind) {
+  return series(account, kind, Date.now() - 24 * HOUR_MS).map(r => Math.max(0, 100 - r.used))
 }
 
 export function stats() {

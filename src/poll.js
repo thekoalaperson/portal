@@ -4,8 +4,8 @@
 
 import { readFileSync } from 'node:fs'
 import * as cache from './cache.js'
-import { freshen, pending } from './freshen.js'
-import { planAll } from './plan.js'
+import { due, freshen, renewable } from './freshen.js'
+import { needsSignIn, planAll } from './plan.js'
 import { PROVIDERS } from './providers/index.js'
 import * as store from './store.js'
 import { dim } from './ui/render.js'
@@ -43,7 +43,7 @@ async function read(account, { reuse = true } = {}) {
   let usage = await attempt()
   // A blip (a 429, a dropped connection) is worth one more try before the
   // screen falls back to an old reading; a sign-in problem is not.
-  if (!usage.ok && !usage.inactive) {
+  if (!usage.ok && !needsSignIn(usage)) {
     await new Promise(r => setTimeout(r, RETRY_AFTER_MS))
     usage = await attempt()
   }
@@ -55,7 +55,7 @@ function settle(account, usage) {
   // No live reading: fall back to what the last one means now, if it means
   // anything -- and to the plan it was on, which does not change between reads.
   if (!usage.ok) {
-    const replay = store.replay(account, { inactive: usage.inactive === true })
+    const replay = store.replay(account, { inactive: needsSignIn(usage) })
     if (replay) {
       const last = cache.lastUsage(account.key)
       usage = { plan: last?.plan, tier: last?.tier, ...usage, ...replay }
@@ -64,31 +64,31 @@ function settle(account, usage) {
   return { account, usage }
 }
 
-export async function snapshot(accounts, { renew = true, quiet = false, fresh = false } = {}) {
+export async function snapshot(accounts, { quiet = false, fresh = false } = {}) {
   let usages = await Promise.all(accounts.map(a => read(a, { reuse: !fresh })))
 
-  // Expired sign-ins the official CLIs can renew: renew them all at once, then
-  // read those accounts again.
+  // Expired sign-ins the official CLIs may renew: renew them all at once, then
+  // read those accounts again. The expired credentials themselves go no further.
   const jobs = []
   usages.forEach((u, i) => {
-    if (!u.ok && u.refreshable?.length) {
-      for (const r of u.refreshable) jobs.push({ provider: accounts[i].provider, home: r.home, index: i })
+    for (const c of u.expiredCreds ?? []) {
+      if (renewable(accounts[i].provider, c)) jobs.push({ provider: accounts[i].provider, home: c.home, index: i })
     }
   })
-  const todo = renew && !process.env.PORTAL_FIXTURE ? pending(jobs) : []
-  let renewed = []
+  const todo = process.env.PORTAL_FIXTURE ? [] : due(jobs)
   if (todo.length) {
     if (!quiet && process.stderr.isTTY) process.stderr.write(dim(`  renewing ${todo.length} sign-in${todo.length > 1 ? 's' : ''} through the official CLI…`))
-    renewed = await freshen(todo)
+    await freshen(todo)
     if (!quiet && process.stderr.isTTY) process.stderr.write('\r\x1b[2K')
     const again = [...new Set(todo.map(j => j.index))]
     const reread = await Promise.all(again.map(i => read(accounts[i], { reuse: false })))
     again.forEach((i, k) => { usages[i] = reread[k] })
   }
+  usages = usages.map(({ expiredCreds, ...u }) => u)
 
   const results = accounts.map((a, i) => settle(a, usages[i]))
-  const recorded = store.recordMany(results.filter(r => !r.usage.reused))
+  store.recordMany(results.filter(r => !r.usage.reused))
   cache.flush()
   let plans
-  return { results, recorded, renewed, get plans() { return plans ??= planAll(results) } }
+  return { results, get plans() { return plans ??= planAll(results) } }
 }

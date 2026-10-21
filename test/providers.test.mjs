@@ -6,22 +6,17 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { promisify } from 'node:util'
+import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { H, jwt, root, runPortal } from './helpers.mjs'
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const H = 3_600_000
-const jwt = (claims) => `x.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.y`
 const iso = (h) => new Date(Date.now() + h * H).toISOString()
+// Worked out here independently of src/platform.js, as a check on it.
 const service = (dir) => `Claude Code-credentials-${createHash('sha256').update(dir.normalize('NFC')).digest('hex').slice(0, 8)}`
-const { CODEX_HOME, CLAUDE_CONFIG_DIR, ...cleanEnv } = process.env
 const USER = 'tester'
 
 // Who each token belongs to; anything else is a 401, like an expired token.
@@ -132,9 +127,13 @@ process.stdin.on('data', (d) => {
 })
 `, { mode: 0o755 })
 
-  const env = { ...cleanEnv, HOME: home, USER, PORTAL_HOME: portal, PORTAL_FAKE_KEYCHAIN: keychain, PORTAL_NO_PROMPT: '1', PORTAL_NO_BROWSER: '1',
+  const env = { HOME: home, USER, PORTAL_HOME: portal, PORTAL_FAKE_KEYCHAIN: keychain, PORTAL_NO_PROMPT: '1', PORTAL_NO_BROWSER: '1',
     PORTAL_CLAUDE_API: api, PORTAL_CODEX_API: api, NO_COLOR: '1', COLUMNS: '92', PATH: `${bin}:${process.env.PATH}` }
-  const run = (args) => promisify(execFile)(process.execPath, [join(root, 'bin/portal'), ...args], { env, encoding: 'utf8' }).then(r => r.stdout)
+  const run = async (args) => {
+    const out = await runPortal(env, args)
+    assert.equal(typeof out, 'string', `portal ${args.join(' ')} failed: ${out.out}`)
+    return out
+  }
 
   try {
     const out = await run([])

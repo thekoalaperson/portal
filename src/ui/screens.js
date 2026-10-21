@@ -1,28 +1,30 @@
 // The screens beyond the home view: one account in detail, every account and
 // where it comes from, the pace plan, the reset schedule, the history.
 
-import { isTopLevel, isUsable, leftOf, readState } from '../plan.js'
-import { PROVIDERS, PROVIDER_ORDER } from '../providers/index.js'
+import { isTopLevel, isUsable, leftOf, needsSignIn, readState } from '../plan.js'
+import { PROVIDER_ORDER } from '../providers/index.js'
 import * as store from '../store.js'
 import {
-  banner, bold, clock, dateOnly, dayLabel, dim, dot, green, meter, pace, percent, providerColor, red,
+  bold, clock, dateOnly, dayLabel, dim, dot, green, meter, pace, percent, plain, providerColor,
   relative, screen, screenWidth, section, sparkline, table, yellow,
 } from './render.js'
-import { bankedNote, creditsNote, nameOf, paceOrigin, planName, verdictDot, verdictLong, windowLabel } from './words.js'
+import { bankedNote, creditsNote, nameOf, paceOrigin, planName, signInCommand, verdictDot, verdictLong, windowLabel } from './words.js'
 
 const SOURCE = { portal: 'portal sign-in', orca: 'orca', default: 'default login', known: 'your config (not signed in here)' }
 
-function providerSections(plans, rowFor) {
+// One section per provider, a row per item: listOf(provider) says which items.
+function sections(listOf, rowFor) {
   const rows = []
   for (const provider of PROVIDER_ORDER) {
-    const ordered = (plans[provider]?.ordered ?? []).filter(a => !a.account.hidden)
-    if (ordered.length === 0) continue
+    const list = listOf(provider)
+    if (list.length === 0) continue
     if (rows.length) rows.push(null)
-    rows.push(section(PROVIDERS[provider].title, { indent: 0, width: screenWidth() - 2 }))
-    for (const a of ordered) rows.push(rowFor(a))
+    rows.push(section(provider, { indent: 0, width: screenWidth() - 2 }))
+    for (const item of list) rows.push(rowFor(item))
   }
   return rows
 }
+const planned = (plans) => (provider) => plans[provider]?.ordered ?? []
 
 // ---------------------------------------------------------------- detail
 
@@ -31,17 +33,20 @@ function providerSections(plans, rowFor) {
 export function detail(results, plans) {
   const out = ['']
   for (const { account, usage } of results) {
-    const a = plans[account.provider]?.analyses.find(x => x.account.key === account.key)
+    const a = plans[account.provider]?.analyses.find(x => x.account === account)
     const state = readState(usage)
     out.push(`  ${providerColor(account.provider)('▌')} ${bold(nameOf(account))} ${dim('·')} ${account.provider} ${dim(planName(usage, account) || '')}` +
       dim(`  ${account.email}`))
     const rows = []
-    for (const w of (usage.windows ?? []).filter(w => usage.ok)) {
-      const left = leftOf(w)
-      rows.push([dim(windowLabel(w.kind)), meter(left, 14), percent(left) + dim(' left'),
-        w.startsOnUse ? dim('starts on first use') : w.resetAt ? `resets ${clock(w.resetAt)} ${dim('· in ' + relative(w.resetAt))}` : dim('—')])
+    if (usage.ok) {
+      for (const w of usage.windows) {
+        const left = leftOf(w)
+        rows.push([dim(windowLabel(w.kind)), meter(left, 14), percent(left) + dim(' left'),
+          w.startsOnUse ? dim('starts on first use') : w.resetAt ? `resets ${clock(w.resetAt)} ${dim('· in ' + relative(w.resetAt))}` : dim('—')])
+      }
+    } else {
+      rows.push([dim('usage'), yellow(usage.error ?? 'no reading'), '', needsSignIn(usage) ? dim(signInCommand(account)) : ''])
     }
-    if (state.kind === 'none') rows.push([dim('usage'), yellow(usage.error ?? 'no reading'), '', usage.hint ? dim(usage.hint) : ''])
     const facts = []
     if (a) {
       facts.push(['at reset', verdictLong(a)])
@@ -52,11 +57,11 @@ export function detail(results, plans) {
     if (account.renews) facts.push(['renews', `${dateOnly(account.renews.at)} ${dim(account.renews.estimated ? '· estimated' : '· in ' + relative(account.renews.at))}`])
     const until = usage.signInUntil ? dim(` · renews itself until ${dateOnly(usage.signInUntil)}`) : ''
     facts.push(['sign-in', state.kind === 'live' ? green('live') + dim(` · ${SOURCE[usage.source] ?? usage.source ?? ''}`) + until
-      : yellow(usage.error ?? 'not readable') + dim(` · portal login ${account.provider} ${nameOf(account)}`) +
-        (state.kind !== 'none' ? dim(` · numbers above are from ${relative(state.at).replace(/\x1b\[[0-9;]*m/g, '')}`) : '')])
+      : yellow(usage.error ?? 'not readable') + dim(` · ${signInCommand(account)}`) +
+        (state.kind !== 'none' ? dim(` · numbers above are from ${plain(relative(state.at))}`) : '')])
     facts.push(['found in', account.sources.map(s => SOURCE[s] ?? s).join(dim(', '))])
     facts.push(['chrome', account.chrome ? `${account.chrome.label} ${dim(`(${account.chrome.dir})`)}` : yellow('no profile') + dim(` · portal profile ${nameOf(account)} <profile>`)])
-    if (rows.length) out.push(table(rows, { indent: 4, align: 'llrl' }), '')
+    out.push(table(rows, { indent: 4, align: 'llrl' }), '')
     out.push(table(facts.map(([k, v]) => [dim(k), v]), { indent: 4 }))
     out.push('')
   }
@@ -66,32 +71,25 @@ export function detail(results, plans) {
 // -------------------------------------------------------------- accounts
 
 export function accountsScreen(results) {
-  const rows = []
-  for (const provider of PROVIDER_ORDER) {
-    const group = results.filter(r => r.account.provider === provider)
-    if (!group.length) continue
-    if (rows.length) rows.push(null)
-    rows.push(section(PROVIDERS[provider].title, { indent: 0, width: screenWidth() - 2 }))
-    for (const { account, usage } of group) {
-      const state = readState(usage)
-      rows.push([
-        account.hidden ? dim(nameOf(account)) : bold(nameOf(account)),
-        account.names.length ? account.names.join(', ') : dim('—'),
-        dim(planName(usage, account) || ''),
-        state.kind === 'live' ? dot(green, green('live'))
-          : state.kind === 'none' ? dot(yellow, yellow('no sign-in'), { live: false })
-          : dot(yellow, yellow(`as of ${relative(state.at)}`), { live: false }),
-        account.chrome ? account.chrome.label : yellow('no profile'),
-        account.renews ? `${dateOnly(account.renews.at)}${account.renews.estimated ? dim('~') : ''}` : dim('—'),
-        dim(account.sources.map(s => SOURCE[s] ?? s).join(', ')) + (account.hidden ? dim(' · hidden') : ''),
-      ])
-    }
-  }
+  const rows = sections((provider) => results.filter(r => r.account.provider === provider), ({ account, usage }) => {
+    const state = readState(usage)
+    return [
+      account.hidden ? dim(nameOf(account)) : bold(nameOf(account)),
+      account.names.length ? account.names.join(', ') : dim('—'),
+      dim(planName(usage, account) || ''),
+      state.kind === 'live' ? dot(green, green('live'))
+        : state.kind === 'none' ? dot(yellow, yellow('no sign-in'), { live: false })
+        : dot(yellow, yellow(`as of ${relative(state.at)}`), { live: false }),
+      account.chrome ? account.chrome.label : yellow('no profile'),
+      account.renews ? `${dateOnly(account.renews.at)}${account.renews.estimated ? dim('~') : ''}` : dim('—'),
+      dim(account.sources.map(s => SOURCE[s] ?? s).join(', ')) + (account.hidden ? dim(' · hidden') : ''),
+    ]
+  })
   return screen({
     what: 'accounts', rows,
     headers: ['account', 'names', 'plan', 'sign-in', 'chrome', 'renews', 'found in'],
     footnotes: [
-      'name one: portal name <name> <who>   ·   sign one in: portal login claude|codex <who>   ·   add one: portal add',
+      'name one: portal alias <name> <who>   ·   sign one in: portal login claude|codex <who>   ·   add one: portal add',
     ],
   })
 }
@@ -99,7 +97,7 @@ export function accountsScreen(results) {
 // ------------------------------------------------------------------ plan
 
 export function planScreen(plans) {
-  const rows = providerSections(plans, (a) => [
+  const rows = sections(planned(plans), (a) => [
     nameOf(a.account), percent(a.left), relative(a.resetAt),
     isUsable(a) ? pace(a.need) : dim('—'),
     a.doing > 0 ? pace(a.doing) : dim('idle'),
@@ -121,7 +119,7 @@ export function planScreen(plans) {
 export function scheduleScreen(results, { all = false } = {}) {
   const events = []
   for (const { account, usage } of results) {
-    if (account.hidden || readState(usage).kind === 'none') continue
+    if (readState(usage).kind === 'none') continue
     for (const w of usage.windows ?? []) {
       if (!w.resetAt || w.usedPercent === 0) continue
       if (!all && (!isTopLevel(w) || w.kind === '5h')) continue
@@ -154,7 +152,7 @@ export function scheduleScreen(results, { all = false } = {}) {
 // --------------------------------------------------------------- history
 
 export function historyScreen(plans) {
-  const rows = providerSections(plans, (a) => [
+  const rows = sections(planned(plans), (a) => [
     nameOf(a.account), sparkline(store.trail(a.account, a.budgetKind)), percent(a.left),
     a.doing > 0 ? pace(a.doing) : dim('idle'), pace(a.ceiling), verdictDot(a),
   ])
@@ -165,4 +163,3 @@ export function historyScreen(plans) {
   })
 }
 
-export { banner, meter, red }

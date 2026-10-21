@@ -2,19 +2,18 @@
 // Chrome profile one command away.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { profileFor, profiles, launch } from './chrome.js'
-import { keyOf, load, save } from './config.js'
+import { findProfile, launch, profileFor, profiles } from './chrome.js'
+import { load, save } from './config.js'
 import { discover } from './discover.js'
-import { readState, leftOf } from './plan.js'
+import { leftOf, readState } from './plan.js'
+import { readJson } from './platform.js'
 import { snapshot as poll } from './poll.js'
 import { PROVIDERS, PROVIDER_ORDER } from './providers/index.js'
 import { allRecipes, BUILTIN, prepare, probe, runPrepared, shellish } from './recipes.js'
-import { people, resolveAccounts, resolvePerson, resolveProfile } from './resolve.js'
-import { setup } from './setup.js'
-import { signIn } from './signin.js'
+import { locate, notFound, resolveAccounts, resolvePerson, resolveProfile } from './resolve.js'
 import * as store from './store.js'
 import { home, nextLine } from './ui/home.js'
 import { interactive } from './ui/prompt.js'
@@ -38,7 +37,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--') { passthrough = argv.slice(i + 1); break }
-    if (/^--?[a-z]/i.test(arg) && !/^-\d/.test(arg)) {
+    if (/^--?[a-z]/i.test(arg)) {
       const [k, v] = arg.replace(/^--?/, '').split('=')
       flags[k] = v ?? true
     } else rest.push(arg)
@@ -47,6 +46,7 @@ function parseArgs(argv) {
 }
 
 const say = (s = '') => console.log(s)
+const printJson = (snap) => say(JSON.stringify(jsonOf(snap), null, 2))
 let FRESH = false
 // --fresh asks every provider again even when the last reading is under a minute old.
 const snapshot = (accounts, opts = {}) => poll(accounts, { fresh: FRESH, ...opts })
@@ -57,80 +57,69 @@ async function cmdHome(ctx) {
   const { cfg, accounts, flags } = ctx
   // A machine with nothing on it: walk through setup instead of an empty screen.
   if (accounts.length === 0) {
-    if (interactive() && !flags.json) return setup(cfg, { firstRun: true })
-    say(dim('\n  no accounts yet · run `portal setup` to add one\n'))
-    return
+    if (interactive() && !flags.json) return (await import('./setup.js')).setup(cfg, ctx.allAccounts, { firstRun: true })
+    return say(dim('\n  no accounts yet · run `portal setup` to add one\n'))
   }
-  const shown = accounts.filter(a => flags.hidden || !a.hidden)
-  const snap = await snapshot(shown)
-  if (flags.json) return say(JSON.stringify(jsonOf(snap), null, 2))
-  say(home(snap, { showHidden: !!flags.hidden, all: !!flags.all }))
-  if (!cfg.exists) say(dim('  first time here · ') + 'portal help' + dim(' for everything portal does\n'))
+  const snap = await snapshot(accounts)
+  if (flags.json) return printJson(snap)
+  say(home(snap, { all: !!flags.all }))
   // Keep what the first run carried over (names from basketstar), so it is
   // the user's file from now on.
-  if (!cfg.exists) save(cfg)
+  if (!cfg.exists) {
+    say(dim('  first time here · ') + 'portal help' + dim(' for everything portal does\n'))
+    save(cfg)
+  }
 }
 
 function jsonOf(snap) {
+  const analyses = new Map(Object.values(snap.plans).flatMap(p => p.analyses).map(a => [a.account, a]))
   return snap.results.map(({ account, usage }) => {
-    const a = snap.plans[account.provider]?.analyses.find(x => x.account.key === account.key)
+    const a = analyses.get(account)
     const { creds, ...acct } = account
     return {
       ...acct,
       state: readState(usage).kind,
-      usage: usage.windows ? { ...usage, raw: undefined, windows: usage.windows.map(w => ({ ...w, leftPercent: leftOf(w) })) } : usage,
+      usage: usage.windows ? { ...usage, windows: usage.windows.map(w => ({ ...w, leftPercent: leftOf(w) })) } : usage,
       plan: a ? { left: a.left, resetAt: a.resetAt, verdict: a.verdict, need: a.need, doing: a.doing, peak: a.ceiling, waste: a.waste } : null,
     }
   })
 }
 
 async function cmdDetail(ctx, selector) {
-  let matches
-  try {
-    matches = resolvePerson(ctx.accounts, selector)
-  } catch (err) {
-    if (!/no account matches/.test(err.message)) throw err
-    const { profile } = resolveProfile(ctx.accounts, ctx.cfg, selector)
-    return say(dim(`\n  "${selector}" is the Chrome profile "${profile.label}"${profile.email ? ` (${profile.email})` : ''}, with no Claude or Codex account here\n  `) +
+  const t = resolveProfile(ctx.accounts, ctx.cfg, selector)
+  if (!t.accounts.length) {
+    const p = t.profile
+    return say(dim(`\n  "${selector}" is the Chrome profile "${p.label}"${p.email ? ` (${p.email})` : ''}, with no Claude or Codex account here\n  `) +
       `portal open ${selector}` + dim(' opens it · ') + `portal login gh ${selector}` + dim(' signs in there · ') + `portal login claude ${selector}` + dim(' adds an account\n'))
   }
-  const snap = await snapshot(matches)
-  if (ctx.flags.json) return say(JSON.stringify(jsonOf(snap), null, 2))
+  const snap = await snapshot(t.accounts)
+  if (ctx.flags.json) return printJson(snap)
   say(detail(snap.results, snap.plans))
 }
 
 async function cmdNext(ctx) {
-  const snap = await snapshot(ctx.accounts.filter(a => !a.hidden))
+  const snap = await snapshot(ctx.accounts)
   say('')
   let any = false
   for (const provider of PROVIDER_ORDER) {
     const p = snap.plans[provider]
-    if (!p && !snap.results.some(r => r.account.provider === provider)) continue
-    if (p?.steps.length) any = true
+    if (!p) continue
+    if (p.steps.length) any = true
     say(nextLine(p, provider))
   }
   say('')
   if (!any) process.exitCode = 1
 }
 
-async function cmdPlan(ctx) {
-  const snap = await snapshot(resolveAccounts(ctx.accounts, ctx.rest[0]))
-  say(planScreen(snap.plans))
-}
-
-async function cmdSchedule(ctx) {
-  const snap = await snapshot(resolveAccounts(ctx.accounts, ctx.rest[0]))
-  say(scheduleScreen(snap.results, { all: !!ctx.flags.all }))
-}
-
-async function cmdHistory(ctx) {
-  const snap = await snapshot(resolveAccounts(ctx.accounts, ctx.rest[0]))
-  say(historyScreen(snap.plans))
-}
+// plan, schedule, history: the same reading, a different screen.
+const screenOf = (render) => async (ctx) => say(render(await snapshot(resolveAccounts(ctx.accounts, ctx.rest[0])), ctx))
+const cmdPlan = screenOf((snap) => planScreen(snap.plans))
+const cmdSchedule = screenOf((snap, ctx) => scheduleScreen(snap.results, { all: !!ctx.flags.all }))
+const cmdHistory = screenOf((snap) => historyScreen(snap.plans))
 
 async function cmdAccounts(ctx) {
-  const snap = await snapshot(ctx.accounts)
-  if (ctx.flags.json) return say(JSON.stringify(jsonOf(snap), null, 2))
+  const snap = await snapshot(ctx.allAccounts)
+  if (ctx.flags.json) return printJson(snap)
   say(accountsScreen(snap.results))
 }
 
@@ -142,9 +131,8 @@ async function cmdWatch(ctx) {
   const restore = () => { if (live) process.stdout.write('\x1b[?25h\n') }
   process.on('SIGINT', () => { restore(); process.exit(0) })
   process.on('exit', restore)
-  const accounts = ctx.accounts.filter(a => !a.hidden)
   const tick = async () => {
-    const snap = await snapshot(accounts, { quiet: true, fresh: true })
+    const snap = await snapshot(ctx.accounts, { quiet: true, fresh: true })
     if (live) process.stdout.write('\x1b[2J\x1b[H')
     say(home(snap))
     say(dim(`  updated ${new Date().toLocaleTimeString()} · every ${interval / 1000}s · ${store.stats().samples} readings · ctrl-c to stop`))
@@ -164,7 +152,7 @@ async function cmdOpen(ctx) {
   const { cfg, flags, accounts } = ctx
   let [target, who] = ctx.rest
   if (!target) throw new Error('usage: portal open <claude|codex|chatgpt|site|who> [who]')
-  const sites = { ...SITES, ...Object.fromEntries(Object.entries(cfg.sites ?? {}).map(([k, v]) => [k, typeof v === 'string' ? { url: v } : v])) }
+  const sites = { ...SITES, ...Object.fromEntries(Object.entries(cfg.sites).map(([k, v]) => [k, typeof v === 'string' ? { url: v } : v])) }
   const dryRun = !!flags['dry-run']
   const show = (profile, email, url, who) => {
     if (!profile) throw new Error(`${email ?? who} has no Chrome profile · portal profile ${who ?? email} <profile>`)
@@ -173,16 +161,15 @@ async function cmdOpen(ctx) {
   }
   const go = (account, url) => show(account.chrome, account.email, url, nameOf(account))
   const goTo = (who, url) => { const t = resolveProfile(accounts, cfg, who); show(t.profile, t.email, url, who) }
-
-  if (target === 'all') {
+  // One window per Chrome profile, however many accounts share it.
+  const openEach = (list, url) => {
     const seen = new Set()
-    for (const a of accounts.filter(x => x.chrome && !x.hidden)) {
-      if (seen.has(a.chrome.dir)) continue
-      seen.add(a.chrome.dir)
-      go(a, null)
+    for (const a of list.filter(x => x.chrome)) {
+      if (!seen.has(a.chrome.dir)) { seen.add(a.chrome.dir); go(a, url) }
     }
-    return
   }
+
+  if (target === 'all') return openEach(accounts, null)
 
   // "open hash claude" means the same as "open claude hash".
   if (!sites[target.toLowerCase()] && who && sites[who.toLowerCase()]) [target, who] = [who, target]
@@ -191,19 +178,11 @@ async function cmdOpen(ctx) {
 
   // The usage page by default, a fresh chat with --chat: his call, last version.
   const url = flags.chat || !site.usage ? site.url : site.usage
-  if (site.provider && flags.all) {
-    const seen = new Set()
-    for (const a of accounts.filter(x => x.provider === site.provider && x.chrome && !x.hidden)) {
-      if (seen.has(a.chrome.dir)) continue
-      seen.add(a.chrome.dir)
-      go(a, url)
-    }
-    return
-  }
+  if (site.provider && flags.all) return openEach(accounts.filter(x => x.provider === site.provider), url)
   if (who) return goTo(who, url)
   if (site.provider) {
     // No one named: the account the planner would have him use right now.
-    const snap = await snapshot(accounts.filter(a => a.provider === site.provider && !a.hidden), { quiet: true })
+    const snap = await snapshot(accounts.filter(a => a.provider === site.provider), { quiet: true })
     const p = snap.plans[site.provider]
     const pick = p?.steps[0]?.a ?? p?.next?.a
     if (!pick) throw new Error(`no ${site.provider} account to open`)
@@ -226,20 +205,18 @@ async function cmdLogin(ctx) {
   if (!what) throw new Error(`usage: portal login <claude|codex|${Object.keys(recipes).join('|')}> <who> [-- extra args]`)
 
   if (PROVIDERS[what]) {
+    // A known account, or a new one named by its address or its Chrome
+    // profile -- so an account can be added without a terminal to ask on.
     let email = null, profile = null
     if (who) {
-      // A known account, or a new one named by its address or its Chrome
-      // profile -- so an account can be added without a terminal to ask on.
-      try {
-        ({ email, profile } = resolveProfile(accounts, cfg, who))
-      } catch (err) {
-        if (!/no account or Chrome profile matches/.test(err.message) || !who.includes('@')) throw err
-        email = who.toLowerCase()
-        profile = profileFor(email, cfg)
-      }
+      const t = locate(accounts, cfg, who)
+      if (t) ({ email, profile } = t)
+      else if (who.includes('@')) { email = who.toLowerCase(); profile = profileFor(email, cfg) }
+      else throw notFound(accounts, who)
     }
+    const { signIn } = await import('./signin.js')
     const r = await signIn(cfg, what, { email, profile, dryRun: !!flags['dry-run'], log: (s) => say(dim(s)) })
-    if (r) say(r.mismatch ? yellow(`signed in as ${r.email}, not ${r.asked}`) : green(`✓ ${what} · ${r.email}`) + dim(' · readable from now on'))
+    if (r) (await import('./setup.js')).reportSignIn(r)
     return
   }
 
@@ -248,7 +225,7 @@ async function cmdLogin(ctx) {
   const target = who ? resolveProfile(accounts, cfg, who) : null
   const profile = target?.profile ?? null
   if (who && !profile) throw new Error(`${target.email} has no Chrome profile · portal profile ${who} <profile>`)
-  const prepared = prepare(recipe, { email: target?.email ?? profile?.email ?? null, profile, extra: [...extra, ...(passthrough ?? [])] })
+  const prepared = prepare(recipe, { email: target?.email ?? null, profile, extra: [...extra, ...(passthrough ?? [])] })
   const how = !profile ? '' : prepared.focus ? `bring up Chrome "${profile.label}", then ` : `send the sign-in page to Chrome "${profile.label}": `
   if (flags['dry-run']) return say(dim(`would ${how}run: ${shellish(prepared.argv)}`))
   if (profile) say(dim(`signing in through Chrome "${profile.label}" · ${shellish(prepared.argv)}`))
@@ -257,37 +234,28 @@ async function cmdLogin(ctx) {
   if (r.code !== 0) process.exitCode = r.code
 }
 
-const findProfile = (text) => {
-  const want = text.toLowerCase()
-  return profiles().find(p => p.label.toLowerCase() === want || p.dir.toLowerCase() === want || p.email === want) ?? null
-}
-
 async function cmdAdd(ctx) {
-  const { Stopped } = await import('./ui/prompt.js')
-  try { return await addConversation(ctx) } catch (err) { if (!(err instanceof Stopped)) throw err; say(dim('\n  stopped · nothing was added\n')) }
-}
-
-async function addConversation(ctx) {
   const provider = ctx.rest[0]
   if (provider && !PROVIDERS[provider]) throw new Error('usage: portal add [claude|codex]')
   if (!interactive()) throw new Error('portal add asks which account and profile; run it in a terminal, or: portal login claude|codex <who>')
-  const { choose, close } = await import('./ui/prompt.js')
-  const which = provider ?? await choose('add which kind of account?', ['claude', 'codex'])
-  const chrome = profiles()
-  const taken = new Set(ctx.accounts.filter(a => a.provider === which).map(a => a.email))
-  const profile = chrome.length ? await choose(`which Chrome profile should the ${which} sign-in open in?`, chrome, {
-    label: (p) => `${p.label}${p.email ? dim(` · ${p.email}`) : ''}${taken.has(p.email) ? dim(' · already added') : ''}`,
-    fallback: Math.max(0, chrome.findIndex(p => p.email && !taken.has(p.email))),
-  }) : null
-  close()
-  const r = await signIn(ctx.cfg, which, { email: profile?.email || undefined, profile, log: (s) => say(dim('  ' + s)) })
-  if (r) say(r.mismatch ? yellow(`  signed in as ${r.email}, not ${r.asked}`) : green(`  ✓ ${which} · ${r.email}`))
+  const { Stopped, choose, close } = await import('./ui/prompt.js')
+  const { pickProfile, reportSignIn } = await import('./setup.js')
+  const { signIn } = await import('./signin.js')
+  try {
+    const which = provider ?? await choose('add which kind of account?', ['claude', 'codex'])
+    const profile = await pickProfile(ctx.accounts, which)
+    close()
+    reportSignIn(await signIn(ctx.cfg, which, { email: profile?.email || undefined, profile, log: (s) => say(dim('  ' + s)) }), { indent: '  ' })
+  } catch (err) {
+    if (!(err instanceof Stopped)) throw err
+    say(dim('\n  stopped · nothing was added\n'))
+  }
 }
 
 // ---------------------------------------------------------------- names
 
 async function cmdName(ctx) {
-  const { cfg, accounts, flags } = ctx
+  const { cfg, flags } = ctx
   const [name, who] = ctx.rest
   if (!name) return cmdAccounts(ctx)
   const key = name.toLowerCase()
@@ -299,7 +267,7 @@ async function cmdName(ctx) {
     return say(dim(`forgot "${name}"`))
   }
   if (!who) throw new Error('usage: portal alias <name> <account or Chrome profile>   (or: portal alias <name> --remove)')
-  const target = resolveProfile(accounts, cfg, who)
+  const target = resolveProfile(ctx.allAccounts, cfg, who)
   // An address when there is one (it reaches the account and its profile
   // alike, on any machine); a profile's own name for a profile signed into none.
   cfg.names[key] = target.email ?? { profile: target.profile.label }
@@ -311,26 +279,27 @@ function cmdProfile(ctx) {
   const [who, ...rest] = ctx.rest
   const wanted = rest.join(' ')
   if (!who || !wanted) {
-    const names = Object.entries(ctx.cfg.names ?? {})
+    const names = Object.entries(ctx.cfg.names)
     const rows = profiles().map(p => {
       const mine = names.filter(([, v]) => typeof v === 'string' ? !!p.email && v === p.email : v?.profile === p.label || v?.profile === p.dir).map(([n]) => n)
-      const kinds = [...new Set(ctx.accounts.filter(a => a.chrome?.dir === p.dir).map(a => a.provider))]
+      const kinds = [...new Set(ctx.allAccounts.filter(a => a.chrome?.dir === p.dir).map(a => a.provider))]
       return [bold(p.label), p.email || dim('not signed in'), mine.join(', ') || dim('—'), kinds.join(', ') || dim('—'), dim(p.dir)]
     })
     return say(screen({ what: 'chrome profiles', rows, headers: ['profile', 'signed in as', 'names', 'accounts', 'directory'],
       footnotes: ['name one: portal alias <name> <profile>   ·   then: portal open <name>, portal login gh <name>',
         'use one for an account no profile is signed into: portal profile <who> <profile>'] }))
   }
-  const person = resolvePerson(ctx.accounts, who)[0]
+  const person = resolvePerson(ctx.allAccounts, who)[0]
   const p = findProfile(wanted)
-  if (!p) throw new Error(`no Chrome profile "${wanted}" · see: portal profile`)
+  if (!p) throw new Error(`no Chrome profile "${wanted}" · see: portal profiles`)
   ctx.cfg.chrome[person.email] = p.label
   save(ctx.cfg)
   say(dim(`${person.email} → Chrome "${p.label}" (${p.dir})`))
 }
 
 function cmdHide(ctx, hide = true) {
-  const matches = resolveAccounts(ctx.accounts, ctx.rest[0] ?? (() => { throw new Error(`usage: portal ${hide ? 'hide' : 'show'} <who>`) })())
+  if (!ctx.rest[0]) throw new Error(`usage: portal ${hide ? 'hide' : 'show'} <who>`)
+  const matches = resolveAccounts(ctx.allAccounts, ctx.rest[0])
   const set = new Set(ctx.cfg.hidden)
   for (const a of matches) hide ? set.add(a.key) : set.delete(a.key)
   ctx.cfg.hidden = [...set]
@@ -341,7 +310,7 @@ function cmdHide(ctx, hide = true) {
 function cmdRenews(ctx) {
   const [who, date] = ctx.rest
   if (!who || !date || Number.isNaN(Date.parse(date))) throw new Error('usage: portal renews <who> <YYYY-MM-DD>   (the next date the plan renews)')
-  const matches = resolvePerson(ctx.accounts, who)
+  const matches = resolvePerson(ctx.allAccounts, who)
   const target = matches.find(a => a.provider === (ctx.flags.codex ? 'codex' : 'claude')) ?? matches[0]
   ctx.cfg.renews[target.key] = new Date(date).toISOString().slice(0, 10)
   save(ctx.cfg)
@@ -364,7 +333,7 @@ function cmdSite(ctx) {
   }
   const rows = [
     ...Object.entries(SITES).map(([k, v]) => [bold(k), v.url, dim(`built in · no who → the ${v.provider} account to use now`)]),
-    ...Object.entries(cfg.sites ?? {}).map(([k, v]) => [bold(k), typeof v === 'string' ? v : v.url, dim(typeof v === 'string' ? '' : `default: ${v.who}`)]),
+    ...Object.entries(cfg.sites).map(([k, v]) => [bold(k), typeof v === 'string' ? v : v.url, dim(typeof v === 'string' ? '' : `default: ${v.who}`)]),
   ]
   say(screen({ what: 'sites', rows, headers: ['name', 'url', ''], footnotes: ['add one: portal site add <name> <url> [default who]   ·   open: portal open <name> <who>'] }))
 }
@@ -390,7 +359,7 @@ function cmdRecipe(ctx) {
   const rows = [
     [bold('claude'), 'a Claude sign-in of its own', dim('claude auth login')],
     [bold('codex'), 'a Codex sign-in of its own', dim('codex login')],
-    ...Object.entries(allRecipes(cfg)).map(([k, r]) => [bold(k), BUILTIN[k] && !cfg.recipes?.[k] ? r.about : 'yours', dim(shellish(r.run).slice(0, 48))]),
+    ...Object.entries(allRecipes(cfg)).map(([k, r]) => [bold(k), BUILTIN[k] && !cfg.recipes[k] ? r.about : 'yours', dim(shellish(r.run).slice(0, 48))]),
   ]
   say(screen({ what: 'login recipes', rows, headers: ['name', 'what', 'runs'],
     footnotes: ['run one: portal login <name> <who> [-- extra args]', 'add one: portal recipe add <name> -- <command> {email}'] }))
@@ -402,14 +371,14 @@ async function cmdCheck(ctx) {
   const seen = new Set()
   const unique = recipes.filter(([, r]) => { const k = r.check.join(' '); if (seen.has(k)) return false; seen.add(k); return true })
   const results = await Promise.all(unique.map(async ([name, r]) => [name, r, await probe(r)]))
-  const known = new Set(ctx.accounts.map(a => a.email))
+  const known = new Set(ctx.allAccounts.map(a => a.email))
   const rows = results.map(([name, r, res]) => [
     bold(name === 'google' ? 'gcloud' : name),
     !res ? dim('—') : res.ok ? (known.has(res.text) ? green(res.text) : res.text) : yellow(res.text || 'not signed in'),
     dim(shellish(r.check)),
   ])
   for (const provider of PROVIDER_ORDER) {
-    const def = ctx.accounts.find(a => a.provider === provider && a.sources.includes('default'))
+    const def = ctx.allAccounts.find(a => a.provider === provider && a.sources.includes('default'))
     rows.push([bold(provider), def ? green(def.email) : dim('—'), dim('the default login')])
   }
   say(screen({ what: 'check', note: 'who each tool is signed in as', rows, headers: ['tool', 'signed in as', 'from'] }))
@@ -421,10 +390,11 @@ async function cmdCheck(ctx) {
 // fast-forward pull of it, and nothing else.
 function cmdUpdate() {
   if (!existsSync(join(ROOT, '.git'))) throw new Error(`${ROOT} isn't a git checkout · reinstall with the one-line installer (see README)`)
-  const before = spawnSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const head = () => spawnSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const before = head()
   const r = spawnSync('git', ['-C', ROOT, 'pull', '--ff-only', '--quiet'], { stdio: 'inherit' })
   if (r.status !== 0) throw new Error(`couldn't update ${ROOT} (local changes there?)`)
-  const after = spawnSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const after = head()
   say(before === after ? dim(`  already up to date (${after})`) : green(`  ✓ updated ${before} → ${after}`))
 }
 
@@ -482,7 +452,8 @@ const COMMANDS = {
   next: cmdNext, plan: cmdPlan, schedule: cmdSchedule, history: cmdHistory, watch: cmdWatch,
   accounts: cmdAccounts, ls: cmdAccounts, open: cmdOpen, o: cmdOpen,
   login: cmdLogin, auth: cmdLogin, add: cmdAdd,
-  setup: (ctx) => setup(ctx.cfg), name: cmdName, alias: cmdName, profile: cmdProfile, profiles: cmdProfile,
+  setup: async (ctx) => (await import('./setup.js')).setup(ctx.cfg, ctx.allAccounts),
+  name: cmdName, alias: cmdName, profile: cmdProfile, profiles: cmdProfile,
   hide: (ctx) => cmdHide(ctx, true), show: (ctx) => cmdHide(ctx, false), renews: cmdRenews,
   site: cmdSite, sites: cmdSite, recipe: cmdRecipe, recipes: cmdRecipe, check: cmdCheck, whoami: cmdCheck,
   update: cmdUpdate,
@@ -492,12 +463,18 @@ export async function main(argv) {
   const { flags, rest, passthrough } = parseArgs(argv)
   FRESH = !!flags.fresh
   if (flags.help || flags.h || rest[0] === 'help') return say(HELP)
-  if (flags.version || flags.v) return say(`portal ${JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version}`)
+  if (flags.version || flags.v) return say(`portal ${readJson(join(ROOT, 'package.json'))?.version}`)
   try {
     const cfg = load()
-    const { accounts } = discover(cfg)
+    // Accounts are found on first use (update, site, recipe never need them),
+    // and hidden ones are left out here, once, unless --hidden asks for them.
+    let all = null
+    const ctx = {
+      cfg, flags, rest, passthrough,
+      get allAccounts() { return all ??= discover(cfg) },
+      get accounts() { return flags.hidden ? this.allAccounts : this.allAccounts.filter(a => !a.hidden) },
+    }
     const command = COMMANDS[rest[0]] ? rest.shift() : null
-    const ctx = { cfg, accounts, flags, rest, passthrough }
     if (command) await COMMANDS[command](ctx)
     else if (rest[0]) await cmdDetail(ctx, rest[0])
     else await cmdHome(ctx)
@@ -506,5 +483,3 @@ export async function main(argv) {
     process.exitCode = 1
   }
 }
-
-export { keyOf, people, BUILTIN }

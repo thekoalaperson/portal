@@ -11,7 +11,6 @@
 
 import { readFile } from 'node:fs/promises'
 
-export const title = 'codex'
 export const urls = {
   chat: 'https://chatgpt.com/codex',
   usage: 'https://chatgpt.com/codex/settings/usage',
@@ -39,7 +38,7 @@ function windowKind(seconds) {
 // time), so that time is not a deadline. A week started by a single message is
 // still at 0% used, but seconds into its window, with a fixed reset -- so the
 // slack is seconds, not minutes.
-const UNSTARTED_SLACK_S = 10
+export const UNSTARTED_SLACK_S = 10
 
 function normalizeWindow(w) {
   if (!w) return null
@@ -84,9 +83,7 @@ export async function fetchUsage(account, { signal } = {}) {
     // The shared ~/.codex holds whoever signed in last; it counts only when it is this account.
     .filter(c => !account.providerAccountId || !c.accountId || c.accountId === account.providerAccountId)
     .sort((a, b) => b.refreshedAt - a.refreshedAt)
-  if (read.length === 0) {
-    return { ok: false, inactive: true, error: 'not signed in', hint: `portal login codex ${account.names?.[0] ?? account.email.split('@')[0]}`, refreshable: [] }
-  }
+  if (read.length === 0) return { ok: false, inactive: true, error: 'not signed in', expiredCreds: [] }
 
   let res, found = null
   const expired = []
@@ -108,15 +105,9 @@ export async function fetchUsage(account, { signal } = {}) {
     found = c
     break
   }
-  if (!found) {
-    return {
-      ok: false, inactive: true, expired: true, error: 'sign-in expired',
-      hint: `portal login codex ${account.names?.[0] ?? account.email.split('@')[0]}`,
-      refreshable: expired.filter(c => c.refresh).map(c => c.refresh),
-    }
-  }
+  if (!found) return { ok: false, inactive: true, expired: true, error: 'sign-in expired', expiredCreds: expired }
   if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
 
   const body = await res.json()
-  return { ok: true, email: body.email, ...normalize(body), source: found.source, raw: body }
+  return { ok: true, email: body.email, ...normalize(body), source: found.source }
 }

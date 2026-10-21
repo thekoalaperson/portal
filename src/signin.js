@@ -9,10 +9,10 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { keyOf, save } from './config.js'
-import { codexIn } from './discover.js'
+import { save } from './config.js'
+import { claudeIn, codexIn } from './discover.js'
 import { HOMES } from './paths.js'
-import { readJson, which } from './platform.js'
+import { which } from './platform.js'
 import { prepare, runPrepared, shellish } from './recipes.js'
 
 const INSTALL = {
@@ -20,24 +20,17 @@ const INSTALL = {
   codex: 'npm install -g @openai/codex   (or: brew install codex)',
 }
 
-export function newHome(provider) {
-  return join(HOMES, `${provider}-${randomBytes(4).toString('hex')}`)
-}
-
-export function whoIsIn(provider, home) {
-  if (provider === 'claude') return readJson(join(home, '.claude.json'))?.oauthAccount?.emailAddress?.toLowerCase() ?? null
-  return codexIn(home)?.email?.toLowerCase() ?? null
-}
+const whoIsIn = (provider, home) => (provider === 'claude' ? claudeIn(home) : codexIn(home))?.email ?? null
 
 // The portal home already holding this person's login, if there is one.
-export const homeFor = (cfg, provider, email) =>
-  (cfg.accounts ?? []).find(a => a.provider === provider && a.email === email && a.home && existsSync(a.home))?.home ?? null
+const homeFor = (cfg, provider, email) =>
+  cfg.accounts.find(a => a.provider === provider && a.email === email && a.home && existsSync(a.home))?.home ?? null
 
 export async function signIn(cfg, provider, { email, profile, dryRun = false, log = console.log }) {
-  if (!(await which(provider))) {
+  if (!which(provider)) {
     throw new Error(`${provider} is not installed. Install it, then run this again:\n  ${INSTALL[provider]}`)
   }
-  const home = (email && homeFor(cfg, provider, email)) ?? newHome(provider)
+  const home = (email && homeFor(cfg, provider, email)) ?? join(HOMES, `${provider}-${randomBytes(4).toString('hex')}`)
   const recipe = provider === 'claude'
     ? { run: ['claude', 'auth', 'login', '--claudeai', ...(email ? ['--email', email] : [])], browser: 'focus' }
     : { run: ['codex', 'login'], browser: 'focus' }
@@ -59,10 +52,10 @@ export async function signIn(cfg, provider, { email, profile, dryRun = false, lo
 
   // Whoever is signed in there is who the account is, even if it is not the
   // address that was asked for.
-  cfg.accounts = (cfg.accounts ?? []).filter(a => a.home !== home && !(a.provider === provider && a.email === who))
+  cfg.accounts = cfg.accounts.filter(a => a.home !== home && !(a.provider === provider && a.email === who))
   cfg.accounts.push({ provider, email: who, home })
   // By profile name, not directory: "Profile 6" means nothing on another machine.
   if (profile && profile.email !== who) cfg.chrome[who] = profile.label
   save(cfg)
-  return { email: who, home, asked: email, mismatch: !!email && email !== who, key: keyOf(provider, who) }
+  return { provider, email: who, asked: email, mismatch: !!email && email !== who }
 }

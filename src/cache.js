@@ -2,10 +2,8 @@
 // the last one already did. Never a token: only a token's fingerprint and whose
 // it is, and when a renewal last failed.
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
 import { CACHE } from './paths.js'
-import { fingerprint } from './platform.js'
+import { fingerprint, readJson, writeJson } from './platform.js'
 
 const IDENTITY_TTL_MS = 7 * 24 * 3600_000
 
@@ -14,7 +12,7 @@ let dirty = false
 
 function load() {
   if (data) return data
-  try { data = JSON.parse(readFileSync(CACHE, 'utf8')) } catch { data = {} }
+  data = readJson(CACHE) ?? {}
   data.identity ??= {}
   data.freshen ??= {}
   data.usage ??= {}
@@ -31,8 +29,7 @@ export function recentUsage(key, maxAgeMs) {
 // What plan an account was on when last read, for when it cannot be read now.
 export const lastUsage = (key) => load().usage[key]?.usage ?? null
 export function rememberUsage(key, usage) {
-  const { raw, ...rest } = usage
-  load().usage[key] = { at: Date.now(), usage: rest }
+  load().usage[key] = { at: Date.now(), usage }
   dirty = true
 }
 
@@ -53,10 +50,10 @@ export function forget(token) {
 
 // A renewal that failed is not retried on every run: a dead sign-in would
 // otherwise cost seconds each time.
-export const freshenFailedAt = (home) => load().freshen[home ?? '~'] ?? null
-export function noteFreshen(home, ok) {
-  if (ok) delete load().freshen[home ?? '~']
-  else load().freshen[home ?? '~'] = Date.now()
+export const freshenFailedAt = (id) => load().freshen[id] ?? null
+export function noteFreshen(id, ok) {
+  if (ok) delete load().freshen[id]
+  else load().freshen[id] = Date.now()
   dirty = true
 }
 
@@ -64,11 +61,6 @@ export function flush() {
   if (!dirty) return
   const d = load()
   for (const [k, v] of Object.entries(d.identity)) if (Date.now() - v.at > IDENTITY_TTL_MS) delete d.identity[k]
-  try {
-    mkdirSync(dirname(CACHE), { recursive: true })
-    const tmp = `${CACHE}.${process.pid}.tmp`
-    writeFileSync(tmp, JSON.stringify(d))
-    renameSync(tmp, CACHE)
-  } catch { /* a cache is allowed to be lost */ }
+  try { writeJson(CACHE, d) } catch { /* a cache is allowed to be lost */ }
   dirty = false
 }

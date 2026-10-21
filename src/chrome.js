@@ -29,13 +29,21 @@ const order = (dir) => dir === 'Default' ? 0 : Number(dir.replace(/\D/g, '')) ||
 
 export const chromeInstalled = () => MAC ? existsSync('/Applications/Google Chrome.app') : !!profiles().length
 
+// A profile by its name in Chrome, its directory, or the address signed into
+// it -- exactly as written first, then ignoring case.
+export function findProfile(text) {
+  const all = profiles()
+  const want = String(text).toLowerCase()
+  return all.find(p => p.label === text || p.dir === text) ??
+    all.find(p => p.label.toLowerCase() === want || p.dir.toLowerCase() === want || (p.email && p.email === want)) ?? null
+}
+
 // The profile for an address: the one set by hand in the config, else the one
 // signed into that address.
 export function profileFor(email, cfg) {
-  const all = profiles()
-  const want = cfg?.chrome?.[String(email).toLowerCase()]
-  if (want) return all.find(p => p.dir === want || p.label.toLowerCase() === String(want).toLowerCase()) ?? { dir: want, label: want, email: '' }
-  return all.find(p => p.email && p.email === String(email).toLowerCase()) ?? null
+  const want = cfg.chrome[String(email).toLowerCase()]
+  if (want) return findProfile(want) ?? { dir: want, label: want, email: '' }
+  return profiles().find(p => p.email && p.email === String(email).toLowerCase()) ?? null
 }
 
 // Open a page in a profile -- or just bring the profile's window forward.

@@ -75,28 +75,33 @@ function codex(home) {
 
 const RUN = { claude, codex }
 
-// Renew every home in the list at once. Returns the homes that renewed.
-export async function freshen(jobs) {
-  const todo = []
-  const seen = new Set()
-  for (const { provider, home } of jobs) {
-    const id = `${provider}:${home ?? '~'}`
-    if (seen.has(id)) continue
-    seen.add(id)
-    const failed = cache.freshenFailedAt(id)
-    if (failed && Date.now() - failed < RETRY_AFTER_MS) continue
-    if (!(await which(provider))) continue
-    todo.push({ provider, home, id })
-  }
-  const results = await Promise.all(todo.map(async (j) => {
-    const r = await RUN[j.provider](j.home)
-    cache.noteFreshen(j.id, r.ok)
-    return { ...j, ...r }
-  }))
-  return results
+// Who may renew which sign-in -- the whole policy, in one place. Refresh
+// tokens rotate, so each sign-in must have exactly one renewer:
+//   claude  only the config dirs portal signed in itself. The default login is
+//           renewed by Claude Code whenever it runs, and orca's by orca.
+//   codex   any CODEX_HOME but ~/.codex, which the ChatGPT app and a bare
+//           `codex` keep fresh. orca never renews Codex tokens itself.
+export function renewable(provider, cred) {
+  if (provider === 'claude') return cred.source === 'portal' && !!cred.home
+  return !!cred.home
 }
 
-export const pending = (jobs) => jobs.filter(({ provider, home }) => {
-  const failed = cache.freshenFailedAt(`${provider}:${home ?? '~'}`)
-  return !failed || Date.now() - failed >= RETRY_AFTER_MS
-})
+const idOf = ({ provider, home }) => `${provider}:${home}`
+
+// The renewals worth trying now: one per home, installed CLI, and not one that
+// failed in the last half hour.
+export function due(jobs) {
+  const seen = new Set()
+  return jobs.filter((j) => {
+    const id = idOf(j)
+    if (seen.has(id) || !which(j.provider)) return false
+    seen.add(id)
+    const failed = cache.freshenFailedAt(id)
+    return !failed || Date.now() - failed >= RETRY_AFTER_MS
+  })
+}
+
+// Renew every home in the list at once.
+export async function freshen(jobs) {
+  await Promise.all(jobs.map(async (j) => cache.noteFreshen(idOf(j), (await RUN[j.provider](j.home)).ok)))
+}

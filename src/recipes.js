@@ -15,8 +15,10 @@ import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { launch } from './chrome.js'
+import { run } from './platform.js'
 
-export const OPENER = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'portal-browser')
+const PROBE_TIMEOUT_MS = 4000
+const OPENER = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'portal-browser')
 
 export const BUILTIN = {
   google: {
@@ -47,7 +49,7 @@ export const BUILTIN = {
 }
 
 export function allRecipes(cfg) {
-  return { ...BUILTIN, ...(cfg.recipes ?? {}) }
+  return { ...BUILTIN, ...cfg.recipes }
 }
 
 const fill = (argv, vars) => argv.map(a => a.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? ''))
@@ -82,26 +84,21 @@ export async function runPrepared({ argv, env, focus }, profile) {
 
 // Who a recipe's tool is signed in as, from its check command's output. Quiet
 // and bounded: a probe never prompts, and never takes long.
-export function probe(recipe, { timeoutMs = 4000 } = {}) {
-  if (!recipe.check) return Promise.resolve(null)
-  return new Promise((resolve) => {
-    let out = ''
-    let p
-    try {
-      p = spawn(recipe.check[0], recipe.check.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] })
-    } catch {
-      return resolve({ ok: false, text: 'not installed' })
-    }
-    const timer = setTimeout(() => { p.kill(); resolve({ ok: false, text: 'timed out' }) }, timeoutMs)
-    p.stdout.on('data', d => { out += d })
-    p.stderr.on('data', d => { out += d })
-    p.on('error', () => { clearTimeout(timer); resolve({ ok: false, text: 'not installed' }) })
-    p.on('exit', (code) => {
-      clearTimeout(timer)
-      const email = out.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)?.[0]
-      const account = out.match(/account\s+(\S+)/)?.[1]
-      const first = out.split('\n').map(s => s.trim()).find(Boolean) ?? ''
-      resolve({ ok: code === 0, text: email ?? account ?? first.slice(0, 60) })
-    })
-  })
+export async function probe(recipe) {
+  if (!recipe.check) return null
+  let out, ok
+  try {
+    const r = await run(recipe.check[0], recipe.check.slice(1), { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS })
+    out = r.stdout + r.stderr
+    ok = true
+  } catch (err) {
+    if (err.code === 'ENOENT') return { ok: false, text: 'not installed' }
+    if (err.killed) return { ok: false, text: 'timed out' }
+    out = `${err.stdout ?? ''}${err.stderr ?? ''}`   // gh auth status exits 1 with the useful text
+    ok = false
+  }
+  const email = out.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)?.[0]
+  const account = out.match(/account\s+(\S+)/)?.[1]
+  const first = out.split('\n').map(s => s.trim()).find(Boolean) ?? ''
+  return { ok, text: email ?? account ?? first.slice(0, 60) }
 }

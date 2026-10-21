@@ -13,7 +13,6 @@ export const bold = code(1)
 export const red = code(31)
 export const green = code(32)
 export const yellow = code(33)
-export const blue = code(34)
 export const magenta = code(35)
 export const cyan = code(36)
 
@@ -22,7 +21,7 @@ export const cyan = code(36)
 export const screenWidth = () => Math.min(process.stdout.columns ?? 92, 92)
 
 // Everything is shown as what is LEFT, never what is used: a gauge that drains.
-export function leftColor(left) {
+function leftColor(left) {
   if (left <= 5) return red
   if (left <= 25) return yellow
   return green
@@ -42,15 +41,17 @@ export function relative(ms, now = Date.now()) {
 }
 
 const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString()
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const two = (n) => String(n).padStart(2, '0')
 
 // A wall-clock time, with the weekday only when it is not today: "18:40", "Thu 09:15".
+// Formatted by hand: the locale machinery costs more to start than the whole screen.
 export function clock(ms, now = Date.now()) {
   if (ms == null) return dim('—')
-  const t = new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
+  const d = new Date(ms)
+  const t = `${two(d.getHours())}:${two(d.getMinutes())}`
   if (sameDay(ms, now)) return t
-  const tomorrow = sameDay(ms, now + 86_400_000)
-  const day = tomorrow ? 'tmrw' : new Date(ms).toLocaleDateString(undefined, { weekday: 'short' })
-  return `${day} ${t}`
+  return `${sameDay(ms, now + 86_400_000) ? 'tmrw' : WEEKDAYS[d.getDay()]} ${t}`
 }
 
 // "today", "tomorrow", then the weekday and date.
@@ -64,16 +65,15 @@ export function dayLabel(ms) {
 
 export const dateOnly = (ms) => new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
 
-// Column widths are measured on the uncoloured text, since escape codes carry
-// no display width.
-export const visibleWidth = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '').length
+// The text without its colour codes. Column widths are measured on it, since
+// escape codes carry no display width.
+export const plain = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '')
+const visibleWidth = (s) => plain(s).length
 export const padRight = (s, n) => String(s) + ' '.repeat(Math.max(0, n - visibleWidth(s)))
-export const padLeft = (s, n) => ' '.repeat(Math.max(0, n - visibleWidth(s))) + String(s)
+const padLeft = (s, n) => ' '.repeat(Math.max(0, n - visibleWidth(s))) + String(s)
 
-// rows: arrays of cells, a string for a free line, null for a blank line, or
-// RULE for a faint divider. align: one letter per column, 'l' or 'r'.
-export const RULE = Symbol('rule')
-
+// rows: arrays of cells, a string for a free line, or null for a blank line.
+// align: one letter per column, 'l' or 'r'.
 export function table(rows, { headers, align = '', gap = 2, indent = 2, rule = true } = {}) {
   const data = rows.filter(Array.isArray)
   if (data.length === 0) return ''
@@ -93,7 +93,6 @@ export function table(rows, { headers, align = '', gap = 2, indent = 2, rule = t
   }
   for (const r of rows) {
     if (r == null) out.push('')
-    else if (r === RULE) out.push(pad + dim('╌'.repeat(width)))
     else if (typeof r === 'string') out.push(pad + r)
     else out.push(line(r))
   }
@@ -101,11 +100,9 @@ export function table(rows, { headers, align = '', gap = 2, indent = 2, rule = t
 }
 
 // "claude ─────────────────" -- a title that runs into a rule.
-export function section(title, { width = screenWidth(), indent = 2, note = '' } = {}) {
-  const pad = ' '.repeat(indent)
-  const head = bold(title) + (note ? ' ' + dim(note) : '')
-  const rest = Math.max(4, width - indent - visibleWidth(head) - 1)
-  return pad + head + ' ' + dim('─'.repeat(rest))
+export function section(title, { width = screenWidth(), indent = 2 } = {}) {
+  const rest = Math.max(4, width - indent - visibleWidth(title) - 1)
+  return ' '.repeat(indent) + bold(title) + ' ' + dim('─'.repeat(rest))
 }
 
 // A whole screen: a banner saying what this is and when, a table, footnotes.
@@ -118,7 +115,7 @@ export function screen({ what, note, rows, headers, align, footnotes = [], empty
   return out.join('\n')
 }
 
-export const banner = (what, note) =>
+const banner = (what, note) =>
   '  ' + bold('portal') + dim(` · ${what}`) + (note ? dim(` · ${note}`) : '')
 
 // One format for every pace, duration and percentage, so no two screens round
@@ -146,14 +143,14 @@ export const providerColor = (p) => TAG[p] ?? dim
 // blocks give ~8x the resolution of whole cells, which matters when the gap
 // between 39% and 37% left is the whole point.
 const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
-export function meter(left, width = 10, color = leftColor) {
+export function meter(left, width = 10) {
   const clamped = Math.max(0, Math.min(100, left ?? 0))
   const exact = (clamped / 100) * width
   const full = Math.floor(exact)
   const rem = EIGHTHS[Math.round((exact - full) * 8)] ?? ''
   const filled = '█'.repeat(full) + rem
   const pad = Math.max(0, width - visibleWidth(filled))
-  return color(clamped)(filled) + dim('·'.repeat(pad))
+  return leftColor(clamped)(filled) + dim('·'.repeat(pad))
 }
 
 // A row of values as bars, 0..100 → ▁..█, thinned to fit the width.

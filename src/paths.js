@@ -12,7 +12,7 @@ const configHome = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config')
 const dataHome = process.env.XDG_DATA_HOME ?? join(homedir(), '.local/share')
 
 export const CONFIG = root ? join(root, 'config.json') : join(configHome, 'portal', 'config.json')
-export const DATA = root ? join(root, 'data') : join(dataHome, 'portal')
+const DATA = root ? join(root, 'data') : join(dataHome, 'portal')
 export const DB = process.env.PORTAL_DB ?? join(DATA, 'history.db')
 // One directory per account that portal signed in itself. The path is part of
 // the account's identity: Claude names its Keychain entry after the exact

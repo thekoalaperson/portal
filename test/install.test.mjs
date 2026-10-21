@@ -8,9 +8,8 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { root } from './helpers.mjs'
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const nodeDir = dirname(process.execPath)
 
 function install(home, extra = {}) {
