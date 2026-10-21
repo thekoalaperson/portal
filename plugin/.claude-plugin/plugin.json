@@ -1,0 +1,8 @@
+{
+  "name": "portal",
+  "version": "1.0.0",
+  "description": "Ask Claude which Claude/Codex account to use, how much is left on each, and have it set up accounts and logins through the portal CLI",
+  "author": {
+    "name": "thekoalaperson"
+  }
+}

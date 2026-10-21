@@ -1,0 +1,10 @@
+{
+  "name": "portal-accounts",
+  "version": "1.0.0",
+  "description": "Every Claude and Codex account in one place: what to use now, when to switch, and each account's Chrome profile one command away",
+  "type": "module",
+  "bin": { "portal": "./bin/portal" },
+  "engines": { "node": ">=22.13" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "license": "MIT"
+}

@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+// node:sqlite still prints an experimental warning on some Node versions; it
+// is noise on a screen meant to be read at a glance.
+process.removeAllListeners('warning')
+process.on('warning', (w) => { if (w.name !== 'ExperimentalWarning') console.warn(w) })
+const { main } = await import('../src/cli.js')
+await main(process.argv.slice(2))

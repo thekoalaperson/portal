@@ -1,0 +1,14 @@
+{
+  "name": "portal",
+  "owner": {
+    "name": "thekoalaperson"
+  },
+  "plugins": [
+    {
+      "name": "portal",
+      "source": "./plugin",
+      "description": "Claude/Codex accounts, limits and logins through the portal CLI"
+    }
+  ],
+  "description": "portal: every Claude and Codex account, its limits and its Chrome profile, from the terminal or from Claude"
+}

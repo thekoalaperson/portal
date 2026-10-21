@@ -1,0 +1,13 @@
+#!/bin/sh
+# Opens a URL in the Chrome profile portal chose for this login. Logins run by
+# `portal login` point BROWSER / GH_BROWSER here, so the sign-in page lands in
+# the right profile instead of whichever one was used last.
+url="$1"
+for arg in "$@"; do url="$arg"; done
+if [ -z "$PORTAL_PROFILE" ]; then
+  case "$(uname)" in Darwin) exec open "$url" ;; *) exec xdg-open "$url" ;; esac
+fi
+case "$(uname)" in
+  Darwin) exec open -na "Google Chrome" --args --profile-directory="$PORTAL_PROFILE" "$url" ;;
+  *) exec google-chrome --profile-directory="$PORTAL_PROFILE" "$url" ;;
+esac
