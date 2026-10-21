@@ -1,6 +1,6 @@
 ---
 name: portal
-description: Use when the user asks which Claude or Codex account to use, how much usage or quota is left, when limits reset or plans renew, wants to open Claude/ChatGPT/Codex or any site in the right Chrome profile, or wants to sign in an account or run a login (gcloud, gh, their own) in the right profile — through the `portal` CLI.
+description: Use when the user asks which Claude or Codex account to use, wants to switch the account `claude` or `codex` runs as, how much usage or quota is left, when limits reset or plans renew, wants to open Claude/ChatGPT/Codex or any site in the right Chrome profile, or wants to sign in an account or run a login (gcloud, gh, their own) in the right profile — through the `portal` CLI.
 ---
 
 # portal
@@ -15,7 +15,8 @@ never read or handle tokens yourself.
   (`left`, `resetAt`, `verdict`, `need`/`doing`/`peak` in %/h).
 - `portal next` — one line per provider: the account to use now.
 - `portal <who> --json` — one person's accounts in full.
-- `portal check` — who gcloud, gh, the user's own recipes and the default CLIs are signed in as.
+- `portal check` — who gcloud, gh, the user's own recipes, `claude` and `codex` are signed in as.
+- `portal use` — which account `claude` and `codex` use in the user's terminals.
 
 The rule portal plans by: use the account whose weekly budget resets soonest
 (its tokens are lost first). The 5-hour window is a throttle, not a budget.
@@ -50,6 +51,14 @@ Names, logins and sites are like aliases:
   (the official `claude auth login` / `codex login` in a dedicated config dir).
 - `portal login <recipe> <who> [-- flags]` — gcloud (`google`, `gcloud`, `adc`),
   `gh`, or a recipe the user added (`portal recipe` lists them).
+
+## Switching accounts (changes every terminal; tell the user before running)
+- `portal use <who>` — every terminal's `claude` and `codex` run as that
+  person, by pointing `CLAUDE_CONFIG_DIR` / `CODEX_HOME` at their existing
+  sign-in. Nothing is copied and no browser opens. `portal use claude <who>`
+  for one tool, `portal use claude` for the account to use now,
+  `portal use default` to go back. The first run adds a block to the user's
+  shell rc file; say so. It doesn't change this agent's own session.
 
 Add `--dry-run` to `open`/`login` to show what would run without running it.
 Never read, print or move tokens; portal only reads them where the official

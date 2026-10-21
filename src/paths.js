@@ -19,6 +19,9 @@ export const DB = process.env.PORTAL_DB ?? join(DATA, 'history.db')
 // text of CLAUDE_CONFIG_DIR, so these are never renamed.
 export const HOMES = join(DATA, 'homes')
 export const CACHE = join(DATA, 'cache.json')
+// Which account `claude` and `codex` use in a terminal, as shell lines every
+// terminal reads before its prompt. Written by `portal use`.
+export const USE_SH = join(DATA, 'use.sh')
 
 // basketstar, the version before this one. Read once to carry names and
 // history over; never written.

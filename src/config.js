@@ -29,6 +29,9 @@ const EMPTY = () => ({
   sites: {},
   // name -> { run: [...argv], check?: [...argv], browser?: 'env' | 'focus' }.
   recipes: {},
+  // provider -> the email `claude` / `codex` use in a terminal, or null for the
+  // default login. A provider left out is never touched. Set by `portal use`.
+  use: {},
   // Where accounts are discovered from. 'auto' uses a source when it is present.
   sources: { orca: 'auto', default: 'auto' },
 })
