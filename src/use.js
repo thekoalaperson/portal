@@ -13,8 +13,8 @@
 // A portal home holds only its login, so the things a person has built up in
 // the default dir -- settings, plugins, skills, memory -- are linked into it.
 
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { HOME, USE_SH } from './paths.js'
 import { readJson } from './platform.js'
 
@@ -76,14 +76,16 @@ const tilde = (p) => p.startsWith(HOME + '/') ? `$HOME/${p.slice(HOME.length + 1
 
 // The file every terminal reads. The stamp makes a terminal apply a choice
 // once: an `export` typed by hand afterwards stands until the next `portal use`.
+// Renamed into place, so a prompt never reads half of it.
 export function writeChoice(choice) {
   const lines = []
   for (const [provider, c] of Object.entries(choice)) {
     lines.push(c.home ? `  export ${VAR[provider]}=${quote(c.home)}   # ${c.email}` : `  unset ${VAR[provider]}   # the default login${c.email ? `: ${c.email}` : ''}`)
   }
   const stamp = Date.now()
-  mkdirSync(join(USE_SH, '..'), { recursive: true })
-  writeFileSync(USE_SH, [
+  mkdirSync(dirname(USE_SH), { recursive: true })
+  const tmp = `${USE_SH}.${process.pid}.tmp`
+  writeFileSync(tmp, [
     '# Written by `portal use`: which account `claude` and `codex` use in a terminal.',
     '# Every terminal reads this before its prompt. Change it with `portal use`, not by hand.',
     `if [ "\${_PORTAL_USE-}" != "${stamp}" ]; then`,
@@ -92,6 +94,7 @@ export function writeChoice(choice) {
     'fi',
     '',
   ].join('\n'))
+  renameSync(tmp, USE_SH)
 }
 
 // The block that makes a shell read the choice before every prompt.
