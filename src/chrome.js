@@ -5,21 +5,25 @@
 // which is how a work login ends up on a personal account.
 
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { HOME, MAC } from './paths.js'
-import { readJson } from './platform.js'
 
 const LOCAL_STATE = MAC
   ? join(HOME, 'Library/Application Support/Google/Chrome/Local State')
   : join(HOME, '.config/google-chrome/Local State')
 
 let cache = null
+// True when the profiles exist but macOS keeps this terminal from reading
+// another app's data, which otherwise looks exactly like having no profiles.
+export let blocked = false
+export const blockedFix = () => `give ${(process.env.TERM_PROGRAM ?? 'your terminal app').replace(/^Apple_Terminal$/, 'Terminal')} Full Disk Access (System Settings → Privacy & Security), reopen it`
 // Every profile Chrome knows: its directory, the name shown in Chrome, and the
 // Google address it is signed into (empty when it is not signed in).
 export function profiles() {
   if (cache) return cache
-  const info = readJson(LOCAL_STATE)?.profile?.info_cache ?? {}
+  let info = {}
+  try { info = JSON.parse(readFileSync(LOCAL_STATE, 'utf8')).profile?.info_cache ?? {} } catch (err) { blocked = err.code === 'EPERM' }
   cache = Object.entries(info)
     .map(([dir, p]) => ({ dir, label: p.name || dir, email: String(p.user_name ?? '').toLowerCase() }))
     .sort((a, b) => order(a.dir) - order(b.dir))

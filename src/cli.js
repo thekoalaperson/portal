@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { findProfile, launch, profileFor, profiles } from './chrome.js'
+import { blocked, blockedFix, findProfile, launch, profileFor, profiles } from './chrome.js'
 import { load, save } from './config.js'
 import { discover } from './discover.js'
 import { leftOf, readState } from './plan.js'
@@ -351,6 +351,7 @@ function cmdProfile(ctx) {
   const [who, ...rest] = ctx.rest
   const wanted = rest.join(' ')
   if (!who || !wanted) {
+    if (!profiles().length && blocked) throw new Error(`can't read Chrome profiles: macOS blocks this terminal from Chrome's data · ${blockedFix()}`)
     const names = Object.entries(ctx.cfg.names)
     const rows = profiles().map(p => {
       const mine = names.filter(([, v]) => typeof v === 'string' ? !!p.email && v === p.email : v?.profile === p.label || v?.profile === p.dir).map(([n]) => n)

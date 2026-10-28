@@ -2,7 +2,7 @@
 // found, fix what needs a sign-in, offer to add more. Everything it finds is
 // used without asking; it only asks about the things it cannot do alone.
 
-import { profiles, chromeInstalled } from './chrome.js'
+import { profiles, chromeInstalled, blocked, blockedFix } from './chrome.js'
 import { save } from './config.js'
 import { discover, remember } from './discover.js'
 import { which } from './platform.js'
@@ -43,6 +43,7 @@ async function conversation(cfg, all, { firstRun = false } = {}) {
 
   say(dim('found on this machine'))
   say(`  chrome   ${!chromeInstalled() ? dim('not installed · accounts work without it, just no opening in profiles')
+    : blocked ? yellow("can't read profiles") + dim(` · macOS blocks this terminal from Chrome's data — ${blockedFix()}, run setup again`)
     : chrome.length === 0 ? dim('no profiles yet')
     : `${chrome.length} profile${chrome.length === 1 ? '' : 's'}` + dim(' · ' + chrome.slice(0, 4).map(p => p.label).join(', ') + (chrome.length > 4 ? ` +${chrome.length - 4}` : ''))}`)
   for (const provider of ['claude', 'codex']) {
