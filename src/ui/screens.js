@@ -73,23 +73,24 @@ export function detail(results, plans) {
 export function accountsScreen(results) {
   const rows = sections((provider) => results.filter(r => r.account.provider === provider), ({ account, usage }) => {
     const state = readState(usage)
+    // Everything that selects this account: its Chrome profile, then names he chose.
+    const names = [...new Set([account.chrome?.label.toLowerCase(), ...account.names].filter(Boolean))]
     return [
       account.hidden ? dim(nameOf(account)) : bold(nameOf(account)),
-      account.names.length ? account.names.join(', ') : dim('—'),
+      [names.join(', '), account.chrome ? '' : yellow('no profile')].filter(Boolean).join(' · '),
       dim(planName(usage, account) || ''),
       state.kind === 'live' ? dot(green, green('live'))
         : state.kind === 'none' ? dot(yellow, yellow('no sign-in'), { live: false })
         : dot(yellow, yellow(`as of ${relative(state.at)}`), { live: false }),
-      account.chrome ? account.chrome.label : yellow('no profile'),
       account.renews ? `${dateOnly(account.renews.at)}${account.renews.estimated ? dim('~') : ''}` : dim('—'),
       dim(account.sources.map(s => SOURCE[s] ?? s).join(', ')) + (account.hidden ? dim(' · hidden') : ''),
     ]
   })
   return screen({
     what: 'accounts', rows,
-    headers: ['account', 'names', 'plan', 'sign-in', 'chrome', 'renews', 'found in'],
+    headers: ['account', 'names', 'plan', 'sign-in', 'renews', 'found in'],
     footnotes: [
-      'name one: portal alias <name> <who>   ·   sign one in: portal login claude|codex <who>   ·   add one: portal add',
+      'names: its Chrome profile, then your own (portal alias <name> <who>)   ·   sign in: portal login claude|codex <who>',
     ],
   })
 }
